@@ -1,3 +1,9 @@
+<div align="center">
+
+![Antiloop banner](docs/banner.png)
+
+</div>
+
 # Antiloop — Loop Detection and Break for pi
 
 **Antiloop watches every assistant message, tool call and thinking block, and forces the model out of reasoning loops before they eat your context and your patience.** Three simultaneous detection strategies (text similarity, tool-call sequences, thinking content) find loops that humans miss — and progressive intervention (warning → force break → abort) tells the model to take a different approach, without you having to babysit it.
