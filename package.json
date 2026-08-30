@@ -17,7 +17,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/noguerol/antiloop/main/docs/preview.png"
+    "image": "https://raw.githubusercontent.com/noguerol/antiloop/main/docs/preview.jpeg"
   },
   "files": [
     "src"

@@ -1,6 +1,6 @@
 <div align="center">
 
-![Antiloop banner](docs/banner.png)
+![Antiloop banner](docs/banner.jpeg)
 
 </div>
 
@@ -233,9 +233,8 @@ antiloop/
 ├── LICENSE             # MIT
 ├── README.md
 ├── docs/
-│   ├── banner.png      # wide README header
-│   └── preview.png     # npm pi.dev preview card
-├── screenshot.png      # full-res master
+│   ├── banner.jpeg      # wide README header
+│   └── preview.jpeg     # npm pi.dev preview card
 └── src/
     └── index.ts        # full extension (≈975 lines)
 ```
