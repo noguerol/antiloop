@@ -1,6 +1,6 @@
 <div align="center">
 
-![Antiloop banner](docs/banner.jpeg)
+![Antiloop banner](https://raw.githubusercontent.com/noguerol/antiloop/main/docs/banner.jpeg)
 
 </div>
 
