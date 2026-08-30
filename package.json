@@ -1,8 +1,14 @@
 {
   "name": "pi-antiloop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Antiloop: detect reasoning loops and force a break (warn → force → abort) across text, tool, thinking, and structural patterns.",
-  "keywords": ["pi-package", "antiloop", "loop-detection", "reasoning", "monitoring"],
+  "keywords": [
+    "pi-package",
+    "antiloop",
+    "loop-detection",
+    "reasoning",
+    "monitoring"
+  ],
   "author": "Javier Noguerol <https://github.com/noguerol>",
   "license": "MIT",
   "repository": {
