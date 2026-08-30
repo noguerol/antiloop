@@ -6,7 +6,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
-import type { AntiloopState, LoopDetection, Runtime } from "./types.ts";
+import type { AntiloopState, LoopDetection, Runtime, TrackedToolCall } from "./types.ts";
 
 const ICONS = ["", "⚠️", "🛑", "🚨"] as const;
 
@@ -19,6 +19,7 @@ function newState(): AntiloopState {
 		inForcedBreak: false,
 		totalDetections: 0,
 		lastUserMessageTime: 0,
+		lastDetectedTurnIndex: -1,
 	};
 }
 
@@ -64,12 +65,10 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	pi.on("message_end", async (event, ctx) => {
+	pi.on("message_end", async (event) => {
 		if (!config.enabled) return;
 		const msg = event.message;
 		if (msg.role !== "assistant") return;
-
-		const { detectLoops, interventionMessage } = await import("./detect.ts");
 
 		let content = "";
 		let thinking = "";
@@ -81,10 +80,11 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		const toolCalls: Array<{ name: string; args: string }> = [];
+		// Track the call with its id so turn_end can attach the execution result.
+		const toolCalls: TrackedToolCall[] = [];
 		if (Array.isArray(msg.content)) {
 			for (const p of msg.content) {
-				if (p.type === "toolCall") toolCalls.push({ name: p.name, args: JSON.stringify(p.arguments ?? {}) });
+				if (p.type === "toolCall") toolCalls.push({ name: p.name, args: JSON.stringify(p.arguments ?? {}), id: p.id });
 			}
 		}
 
@@ -99,14 +99,6 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		}
 		if (state.recentMessages.length > config.detectionWindow + 5) {
 			state.recentMessages = state.recentMessages.slice(-(config.detectionWindow + 5));
-		}
-
-		const detections = detectLoops(state, config);
-		processDetections(detections, interventionMessage);
-
-		if (config.notifyOnDetection && detections.length && state.currentLevel > 0) {
-			const lvl = ["", "warning", "force", "abort"][state.currentLevel];
-			ctx.ui.notify(`antiloop: ${lvl} — ${detections[0].description}`, state.currentLevel >= 2 ? "error" : "warning");
 		}
 	});
 
@@ -145,8 +137,42 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		return { messages: msgs };
 	});
 
-	pi.on("turn_end", async (_e, ctx) => {
-		if (config.enabled) updateStatus(ctx);
+	pi.on("turn_end", async (event, ctx) => {
+		if (!config.enabled) return;
+		const { detectLoops, interventionMessage, resultFingerprint } = await import("./detect.ts");
+
+		const last = state.recentMessages[state.recentMessages.length - 1];
+		// A turn whose assistant message wasn't tracked (short text, no tools)
+		// must not re-run detection on the previous message — skip it.
+		if (!last || last.turnIndex === state.lastDetectedTurnIndex) {
+			updateStatus(ctx);
+			return;
+		}
+		state.lastDetectedTurnIndex = last.turnIndex;
+
+		// Attach execution results to the message that just finished its turn.
+		// Detection runs here (not at message_end) because the results — the
+		// signal that distinguishes "stuck loop" from "making progress" — only
+		// exist after the tools have executed.
+		if (last.toolCalls?.length && event.toolResults.length) {
+			const byId = new Map<string, string | undefined>();
+			for (const tr of event.toolResults) byId.set(tr.toolCallId, resultFingerprint(tr.content, tr.isError));
+			for (const tc of last.toolCalls) {
+				if (tc.id && tc.result === undefined) {
+					const r = byId.get(tc.id);
+					if (r !== undefined) tc.result = r;
+				}
+			}
+		}
+
+		const detections = detectLoops(state, config);
+		processDetections(detections, interventionMessage);
+
+		if (config.notifyOnDetection && detections.length && state.currentLevel > 0) {
+			const lvl = ["", "warning", "force", "abort"][state.currentLevel];
+			ctx.ui.notify(`antiloop: ${lvl} — ${detections[0].description}`, state.currentLevel >= 2 ? "error" : "warning");
+		}
+		updateStatus(ctx);
 	});
 
 	pi.on("session_start", async (_e, ctx) => {

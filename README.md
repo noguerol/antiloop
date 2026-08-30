@@ -6,13 +6,13 @@
 
 # Antiloop — Loop Detection and Break for pi
 
-**Antiloop watches every assistant message, tool call and thinking block, and forces the model out of reasoning loops before they eat your context and your patience.** Three simultaneous detection strategies (text similarity, tool-call sequences, thinking content) find loops that humans miss — and progressive intervention (warning → force break → abort) tells the model to take a different approach, without you having to babysit it.
+**Antiloop watches every assistant message, tool call and thinking block, and forces the model out of reasoning loops before they eat your context and your patience.** Four simultaneous detection strategies (text similarity, tool-call sequences, thinking content, structural openings) find loops that humans miss — and progressive intervention (warning → force break → abort) tells the model to take a different approach, without you having to babysit it.
 
 ---
 
 ## Features
 
-- **Four detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + argument matching), thinking blocks, and structural opening-phrase patterns
+- **Four detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + near-identical arguments + same outcome — result-aware, so retries that make progress don't false-positive), thinking blocks, and structural opening-phrase patterns
 - **Progressive intervention** — `warning` reminds the model to vary its approach; `force break` injects explicit anti-loop instructions and modifies context; `abort` stops the run entirely
 - **Configurable thresholds** — independent dials for similarity cutoff, warning/force-break/abort counts, detection window, and which strategies are on
 - **Sliding window** — only the last N messages are compared, so detection is O(N) in the window size, not in the full session
@@ -100,7 +100,7 @@ Detection strategies:
 
 Recent detections:
   [text] Text similarity 85% with message 3 (2m ago)
-  [tool] Same tool calls repeated: read, edit (5m ago)
+  [tool] repeated 3x: bash (5m ago)
 ```
 
 ### `/antiloop config`
@@ -112,6 +112,9 @@ Interactive menu with current values:
 - **Force break threshold** — similar messages before force break (default 3)
 - **Abort threshold** — similar messages before abort (0 = disabled)
 - **Similarity threshold** — `0.5 / 0.6 / 0.7 / 0.75 / 0.8 / 0.9` — how close two messages must be to count as looping
+- **Tool similarity** — `0.99 / 0.95 / 0.9 / 0.8` — how close tool-call *arguments* must be to count as the same call (95% default: only near-identical repeats loop)
+- **Tool repeat** — `1 / 2 / 3` — prior occurrences of the same call set required before a tool loop flags
+- **Result similarity** — `0.95 / 0.8 / 0.6` — how similar captured results must be to count as the *same outcome* (veto when a repeated command starts succeeding/differing)
 - **Detection window** — `5 / 10 / 15 / 20` — number of recent messages to analyze
 - **Per-strategy toggles** — text / tool / thinking detection
 - **Notifications** — show detection notifications
@@ -123,30 +126,33 @@ Shows the most recent 30 detections with similarity scores and timestamps, newes
 
 ### `/antiloop test`
 
-Runs five built-in cases plus a tool-call equality check to verify the similarity engine is working correctly:
+Runs the real detection engine (not a copy) — text similarity plus tool-call regression cases:
 
 ```
-"Hello world" vs "Hello world"
-  Similarity: 100.0% (expected: identical)
-"Hello world" vs "Hello World!"
-  Similarity: 95.0% (expected: very similar)
-"I will read the file first" vs "I will read the file first to understand"
-  Similarity: 85.0% (expected: similar)
-...
+text identical      → 100% (exp 100%) ✅
+text near-identical → 91% (exp ≥ 80%) ✅
+text unrelated      → 19% (exp < 50%) ✅
+tool identical cmd  → match (exp match) ✅
+tool sweep (flags)  → no match @95% (exp no match) ✅   ← regression: 0.8–0.94 overlap is NOT a loop
+tool sweep (old 80%)→ match @80% (exp match — was the false positive) ✅
+tool different tool → no match (exp no match) ✅
+tool empty lists    → no match (exp no match) ✅
+result same outcome  → match (exp match — PID noise ok) ✅
+result diff outcome  → no match (exp no match — error→success is progress) ✅
 ```
 
 ## How It Works
 
 ### Detection pipeline
 
-After every `message_end` event, antiloop extracts the new assistant content (text, thinking, tool calls) and pushes it onto a sliding window of the last `detectionWindow + 5` messages. Then it runs the active detection strategies against the current window:
+After every assistant `message_end` event, antiloop extracts the new content (text, thinking, tool calls — including their ids) and pushes it onto a sliding window of the last `detectionWindow + 5` messages. Detection itself runs at `turn_end`, once the tool results are known: results are fingerprinted and attached to the tracked calls, then the active detection strategies run against the window:
 
 | Strategy | What it compares | Algorithm |
 |----------|------------------|-----------|
 | Text | Full assistant message text | n-gram Jaccard (≥ 100 chars) or Levenshtein (shorter) |
-| Tool | Tool name + arguments | Sequence match + ≥ 80% args similarity |
+| Tool | Tool name + arguments (+ captured result) | Sequence match + near-identical args (≥ `toolSimilarityThreshold`, default 95%) *and* ≥ `minToolRepeatCount` prior recurrences. **Result veto:** if both runs captured a result and the outcomes differ, it's progress, not a loop |
 | Thinking | Internal reasoning/thinking blocks | Same as text |
-| Structural | First 10 words of each message | Opening-phrase similarity ≥ 80% across ≥ 3 messages |
+| Structural | First 10 words of each message | Opening-phrase similarity ≥ 90% across ≥ 3 messages |
 
 Each detected pair becomes a `LoopDetection { type, similarity, messageIndices, description }` and the consecutive counter increases.
 
@@ -172,10 +178,34 @@ For longer texts:  Character trigram Jaccard
   "I will read the file first to understand the codebase..."
   → ~85% (many shared 3-grams)
 
-For tool calls:  sequence + per-call argument similarity ≥ 80%
-  [read({path:"/src/x.ts"}), edit({path:"/src/x.ts",...})]
-  [read({path:"/src/x.ts"}), edit({path:"/src/x.ts",...})]
-  → matched
+For tool calls:  sequence + per-call argument similarity ≥ 95% (default)
+  [bash("setsid ./llama-server -m … -b 2048 -ctk q8_0 …")]
+  [bash("setsid ./llama-server -m … -b 2048 -ctk q8_0 …")]      → matched (identical)
+
+  …but a parameter sweep is NOT a loop, even at 80–94% similarity:
+  [bash("… -b 2048 -ctk q8_0 -ctv turbo4 > /tmp/sweep-turbo4.log …")]
+  [bash("… -b 8192 -ctk f16  -ctv f16  > /tmp/sweep-b8192.log …")]  → not matched
+
+  Long bash commands share scaffolding (env setup, model path, most flags),
+  so 80% overlap is normal for *different* sequential operations. Only
+  near-identical repeats — the same call set seen `minToolRepeatCount` times
+  inside the window — count as a tool loop.
+
+Result veto (tool loops):  detection runs at `turn_end`, where the tool
+results are known. Each captured result becomes a normalized tail fingerprint
+("err|" / "ok|" prefix + last 400 chars, so PID/timestamp noise is tolerated).
+If the same command produced a *different* outcome, the pair is progress:
+
+  [bash("...")] → err|error: invalid argument: ROCm0        (attempt 1)
+  [bash("...")] → ok|model loaded / listening on :8093      (attempt 2)
+  → NOT a loop — the retry fixed the problem
+
+  [bash("...")] → err|failed to create context …            (attempt 1)
+  [bash("...")] → err|failed to create context …            (attempt 2)
+  → loop signal (same command, same outcome, repeated)
+
+Results only veto; they never trigger on their own, and calls without a
+captured result fall back to argument matching alone.
 ```
 
 ### Sliding window
@@ -193,6 +223,9 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
   "forceBreakThreshold": 3,
   "abortThreshold": 0,
   "similarityThreshold": 0.75,
+  "toolSimilarityThreshold": 0.95,
+  "minToolRepeatCount": 2,
+  "resultSimilarityThreshold": 0.8,
   "detectToolLoops": true,
   "detectThinkingLoops": true,
   "detectTextLoops": true,
@@ -208,7 +241,10 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 | `warningThreshold` | `2` | Consecutive detections before warning |
 | `forceBreakThreshold` | `3` | Consecutive detections before force break |
 | `abortThreshold` | `0` | Consecutive detections before abort (0 = disabled) |
-| `similarityThreshold` | `0.75` | Minimum similarity (0.0–1.0) to count a pair as looping |
+| `similarityThreshold` | `0.75` | Minimum similarity (0.0–1.0) to count a text/thinking pair as looping |
+| `toolSimilarityThreshold` | `0.95` | How close tool-call arguments must be (0.0–1.0) to count as the *same* call — see [tool loops](#how-it-works) |
+| `minToolRepeatCount` | `2` | Prior occurrences of a near-identical call set required before a tool loop is flagged (2 = same call seen 3×) |
+| `resultSimilarityThreshold` | `0.8` | Minimum similarity between captured result tails to still count as the *same outcome*; below this, a repeated command is treated as progress, not a loop |
 | `detectTextLoops` | `true` | Detect full-text repetition |
 | `detectToolLoops` | `true` | Detect tool-call sequence + argument repetition |
 | `detectThinkingLoops` | `true` | Detect repeated thinking/reasoning content |
@@ -218,12 +254,13 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 
 ## Best Practices
 
-1. **Start with defaults** — `warning=2 / force-break=3 / similarity=75%` works well for most models.
+1. **Start with defaults** — `warning=2 / force-break=3 / similarity=75% / tool-sim=95%` works well for most models.
 2. **Adjust sensitivity to the model** — small/local models loop more, so lower `warningThreshold` and `similarityThreshold` to catch them early. Big cloud models rarely loop, so you can raise them to avoid false positives.
-3. **Per-strategy toggles** — if the model's reasoning legitimately repeats (e.g. it's working through a checklist), disable `thinking` detection and leave text/tool on.
-4. **Watch the log** — `/antiloop log` shows what's actually triggering. If you see false positives, raise `similarityThreshold` instead of disabling the strategy entirely.
-5. **Let user input clear state** — each user message decays the consecutive counter by 2, so a fresh prompt naturally resets without `/antiloop reset`.
-6. **`/antiloop test`** — if you ever change the similarity engine, run the self-test to verify it still produces expected scores.
+3. **Tool loops are strict on purpose** — a long bash command with env setup + flags scores 80–94% similar to the *next, different* command. Antiloop only flags tool calls that are near-identical (≥ 95%) *and* repeated ≥ `minToolRepeatCount` times, *and* — when results are captured — produced the same outcome. If you still see false positives on sequential operations, raise `toolSimilarityThreshold` (or `minToolRepeatCount`, or `resultSimilarityThreshold`) via `/antiloop config` — don't disable the detector.
+4. **Per-strategy toggles** — if the model's reasoning legitimately repeats (e.g. it's working through a checklist), disable `thinking` detection and leave text/tool on.
+5. **Watch the log** — `/antiloop log` shows what's actually triggering. If you see false positives, raise `similarityThreshold` instead of disabling the strategy entirely.
+6. **Let user input clear state** — each user message decays the consecutive counter by 2, so a fresh prompt naturally resets without `/antiloop reset`.
+7. **`/antiloop test`** — runs the real detection engine (text + tool-call regression cases) to verify calibration after any change.
 
 ## Architecture
 
@@ -236,16 +273,21 @@ antiloop/
 │   ├── banner.jpeg      # wide README header
 │   └── preview.jpeg     # npm pi.dev preview card
 └── src/
-    └── index.ts        # full extension (≈975 lines)
+    ├── index.ts        # hooks + intervention pipeline
+    ├── detect.ts       # similarity engine, detection strategies, self-test
+    ├── commands.ts     # /antiloop command handlers + config menu
+    ├── config.ts       # config load/save
+    ├── types.ts        # shared types
+    └── ui.ts           # UI helpers (select, duration)
 ```
 
-Single-file extension with zero external dependencies (only pi's bundled `@earendil-works/pi-coding-agent` + Node built-ins):
+Modular extension with zero external dependencies (only pi's bundled `@earendil-works/pi-coding-agent` + Node built-ins):
 
 - **Levenshtein + trigram Jaccard** hybrid — small texts use edit distance, large texts use n-gram overlap (each is O(N) in text length)
 - **Sliding window** — only the last `detectionWindow` messages participate, capping memory at O(W × message_size)
 - **Early bail** — short messages and empty tool calls skip similarity computation entirely
 - **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` for the persistent status bar
-- **Hooks** — `message_end` (track + detect), `input` (decay), `before_agent_start` (inject intervention), `context` (modify context in force-break mode), `turn_end` (refresh status), `session_start` (load config + reset)
+- **Hooks** — `message_end` (track messages + tool call ids), `turn_end` (attach result fingerprints + detect), `input` (decay), `before_agent_start` (inject intervention), `context` (modify context in force-break mode), `session_start` (load config + reset)
 
 ## License
 

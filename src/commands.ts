@@ -57,6 +57,8 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		"thresholds:",
 		`  warn: ${rt.config.warningThreshold}  force: ${rt.config.forceBreakThreshold}  abort: ${rt.config.abortThreshold || "off"}`,
 		`  similarity: ${(rt.config.similarityThreshold * 100).toFixed(0)}%  window: ${rt.config.detectionWindow}`,
+		`  tool sim: ${(rt.config.toolSimilarityThreshold * 100).toFixed(0)}%  tool repeat: ${rt.config.minToolRepeatCount}+ prior`,
+		`  result sim: ${(rt.config.resultSimilarityThreshold * 100).toFixed(0)}%  (same cmd + diff outcome = no loop)`,
 		"",
 		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)}`,
 	];
@@ -75,6 +77,9 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "force" as const, label: `force threshold: ${c.forceBreakThreshold}` },
 		{ value: "abort" as const, label: `abort threshold: ${c.abortThreshold || "off"}`, description: "0 = disabled" },
 		{ value: "sim" as const, label: `similarity: ${(c.similarityThreshold * 100).toFixed(0)}%` },
+		{ value: "toolSim" as const, label: `tool similarity: ${(c.toolSimilarityThreshold * 100).toFixed(0)}%`, description: "args must match this closely to count as the same call" },
+		{ value: "toolRepeat" as const, label: `tool repeat: ${c.minToolRepeatCount}+ prior`, description: "recurrences before a tool loop flags" },
+		{ value: "resultSim" as const, label: `result similarity: ${(c.resultSimilarityThreshold * 100).toFixed(0)}%`, description: "same cmd + different outcome vetoes the loop" },
 		{ value: "window" as const, label: `window: ${c.detectionWindow} msgs` },
 		{ value: "text" as const, label: `text detect: ${yn(c.detectTextLoops)}` },
 		{ value: "tool" as const, label: `tool detect: ${yn(c.detectToolLoops)}` },
@@ -133,6 +138,34 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 			if (v !== undefined) { c.similarityThreshold = v; saveConfig(c); ctx.ui.notify(`similarity: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
+		case "toolSim": {
+			const v = await selectFrom(ctx, "tool similarity (args)", [
+				{ value: 0.99, label: "99% (strict)" },
+				{ value: 0.95, label: "95% (default)" },
+				{ value: 0.9, label: "90%" },
+				{ value: 0.8, label: "80% (sensitive)" },
+			]);
+			if (v !== undefined) { c.toolSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`tool similarity: ${(v * 100).toFixed(0)}%`, "info"); }
+			break;
+		}
+		case "toolRepeat": {
+			const v = await selectFrom(ctx, "tool repeat (prior occurrences)", [
+				{ value: 1, label: "1 (sensitive)" },
+				{ value: 2, label: "2 (default)" },
+				{ value: 3, label: "3 (relaxed)" },
+			]);
+			if (v !== undefined) { c.minToolRepeatCount = v; saveConfig(c); ctx.ui.notify(`tool repeat: ${v}+ prior`, "info"); }
+			break;
+		}
+		case "resultSim": {
+			const v = await selectFrom(ctx, "result similarity (outcome veto)", [
+				{ value: 0.95, label: "95% (strict — only near-identical results count as same outcome)" },
+				{ value: 0.8, label: "80% (default)" },
+				{ value: 0.6, label: "60% (relaxed — tolerates more output noise)" },
+			]);
+			if (v !== undefined) { c.resultSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`result similarity: ${(v * 100).toFixed(0)}%`, "info"); }
+			break;
+		}
 		case "window": {
 			const v = await selectFrom(ctx, "window", [
 				{ value: 5, label: "5" },
@@ -184,31 +217,12 @@ export function resetState(state: AntiloopState): void {
 	state.consecutiveDetections = 0;
 	state.inForcedBreak = false;
 	state.totalDetections = 0;
+	state.lastDetectedTurnIndex = -1;
 }
 
 async function runSelfTest(ctx: ExtensionCommandContext): Promise<void> {
-	// Inline similarity + normalize (mirrors detect.ts). Keeps test self-contained
-	// without re-importing private helpers.
-	const norm = (t: string) => t.toLowerCase().replace(/\s+/g, " ").replace(/[^\w\s]/g, "").trim();
-	const cases: Array<{ a: string; b: string; expect: string }> = [
-		{ a: "Hello world", b: "Hello world", expect: "1.00" },
-		{ a: "Hello world", b: "Hello World!", expect: "high" },
-		{ a: "The quick brown fox", b: "The quick brown fox jumps over the lazy dog", expect: "high" },
-		{ a: "Hello world", b: "Goodbye universe", expect: "low" },
-		{ a: "I will read the file first", b: "I will read the file first to understand", expect: "high" },
-	];
-	const out: string[] = [];
-	for (const c of cases) {
-		// Re-implement minimal Levenshtein similarity for the self-test
-		const a = norm(c.a), b = norm(c.b);
-		const max = Math.max(a.length, b.length);
-		let diff = 0;
-		for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) diff++;
-		diff += Math.abs(a.length - b.length);
-		const s = max ? 1 - diff / max : 1;
-		out.push(`"${c.a}" vs "${c.b}" → ${(s * 100).toFixed(0)}% (exp: ${c.expect})`);
-	}
-	ctx.ui.notify(`antiloop self-test\n${out.join("\n")}`, "info");
+	const { runSelfTest } = await import("./detect.ts");
+	ctx.ui.notify(`antiloop self-test\n${runSelfTest().join("\n")}`, "info");
 }
 
 function yn(b: boolean): string {
