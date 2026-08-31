@@ -25,6 +25,19 @@ export interface AntiloopConfig {
 	 * loop. Same command + different outcome = progress, not a loop.
 	 */
 	resultSimilarityThreshold: number;
+	/**
+	 * Task-stream recognition (batch work). Extensions like punched (append
+	 * lines to pi.md) or plan (add tasks) make the model call the SAME tool
+	 * many times with DIFFERENT content — N distinct tasks of the same type,
+	 * not a loop. When the same tool appears at least taskStreamMinCalls times
+	 * in the window and no two calls are "twins" (args ≥ taskStreamTwinThreshold
+	 * similar), antiloop treats that tool as an active task stream and does not
+	 * flag repetitions of it, nor text/thinking/structural patterns that only
+	 * involve those batch messages.
+	 */
+	detectTaskStreams: boolean;
+	taskStreamMinCalls: number;
+	taskStreamTwinThreshold: number;
 	detectToolLoops: boolean;
 	detectThinkingLoops: boolean;
 	detectTextLoops: boolean;
@@ -75,9 +88,18 @@ export interface TrackedMessage {
 	turnIndex: number;
 }
 
+export interface TaskStreamInfo {
+	tool: string;
+	count: number;
+}
+
 export interface AntiloopState {
 	recentMessages: TrackedMessage[];
 	detections: LoopDetection[];
+	/** Tools currently being used as a homogeneous batch (N tasks, same type).
+	 * Recomputed at turn_end; shown in the footer/status so a quiet antiloop is
+	 * explainable. */
+	activeTaskStreams: TaskStreamInfo[];
 	currentLevel: 0 | 1 | 2 | 3;
 	consecutiveDetections: number;
 	inForcedBreak: boolean;

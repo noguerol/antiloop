@@ -1,6 +1,6 @@
 // antiloop — similarity + detection engine. Lazy-loaded on first message_end.
 
-import type { AntiloopConfig, AntiloopState, LoopDetection, TrackedToolCall } from "./types.ts";
+import type { AntiloopConfig, AntiloopState, LoopDetection, TrackedMessage, TrackedToolCall } from "./types.ts";
 
 const MIN_CONTENT_LENGTH = 50;
 
@@ -108,6 +108,71 @@ function toolCallsSimilar(
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Task-stream recognition (batch work).
+//
+// Extensions like `punched` (append lines to pi.md) or `plan` (add tasks) make
+// the model call the SAME tool many times in a row with DIFFERENT content:
+// N distinct tasks of the same type — "adding line 1…N to a doc", "adding task
+// 1…N to the plan". That is not a reasoning loop, and antiloop must not fire.
+//
+// A tool is an active task stream when, inside the detection window, it was
+// called at least taskStreamMinCalls times and NO two calls are "twins"
+// (args ≥ taskStreamTwinThreshold similar). Twins = the same task repeated;
+// a stream with twins is indistinguishable from a loop and stays detected.
+// The check is name-agnostic: any extension tool used as a batch is covered.
+// ---------------------------------------------------------------------------
+
+/** Near-identity of two argument payloads — unlike similarity() it works on
+ * short args (JSON templates like {"action":"add",...} are < 50 chars, where
+ * similarity() bails to 0).
+ */
+function argsTwin(a: string, b: string, threshold: number): boolean {
+	const na = normalizeText(a);
+	const nb = normalizeText(b);
+	if (!na.length || !nb.length) return na === nb;
+	if (na === nb) return true;
+	if (na.length < 100 && nb.length < 100) {
+		const max = Math.max(na.length, nb.length);
+		return max > 0 && 1 - levenshtein(na, nb) / max >= threshold;
+	}
+	return similarity(a, b) >= threshold;
+}
+
+/**
+ * Map of tool name → call count for tools currently used as a homogeneous
+ * task stream in the given window. Empty map = no batch work recognized.
+ */
+export function detectTaskStreams(
+	win: TrackedMessage[],
+	config: AntiloopConfig,
+): Map<string, number> {
+	const streams = new Map<string, number>();
+	if (!config.detectTaskStreams || win.length < config.taskStreamMinCalls) return streams;
+
+	const callsByName = new Map<string, string[]>();
+	for (const m of win) {
+		for (const tc of m.toolCalls ?? []) {
+			const arr = callsByName.get(tc.name) ?? [];
+			arr.push(tc.args);
+			callsByName.set(tc.name, arr);
+		}
+	}
+
+	for (const [name, argsList] of callsByName) {
+		if (argsList.length < config.taskStreamMinCalls) continue;
+		let twins = 0;
+		for (let i = 0; i < argsList.length; i++) {
+			for (let j = i + 1; j < argsList.length; j++) {
+				if (argsTwin(argsList[i], argsList[j], config.taskStreamTwinThreshold)) twins++;
+			}
+		}
+		// Every call is a distinct task → batch work, exempt from loop detection.
+		if (twins === 0) streams.set(name, argsList.length);
+	}
+	return streams;
+}
+
 export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopDetection[] {
 	const out: LoopDetection[] = [];
 	const msgs = state.recentMessages;
@@ -116,13 +181,28 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 	const win = msgs.slice(start);
 	const now = Date.now();
 
+	// Task-stream gate: if the window is a homogeneous batch (same extension
+	// tool called with DISTINCT content ≥ taskStreamMinCalls times), that tool
+	// is exempt from tool-loop detection, and text/thinking/structural
+	// detections that only involve batch messages are suppressed too — the
+	// model is doing N different tasks of the same type, not looping.
+	const streams = detectTaskStreams(win, config);
+	const batchAt = new Set<number>();
+	win.forEach((m, idx) => {
+		const calls = m.toolCalls;
+		if (calls && calls.length && calls.every((c) => (streams.get(c.name) ?? 0) >= config.taskStreamMinCalls)) {
+			batchAt.add(start + idx);
+		}
+	});
+	const allBatch = (idxs: number[]): boolean => idxs.every((i) => batchAt.has(i));
+
 	if (config.detectTextLoops) {
 		const last = win[win.length - 1];
 		if (last.content.length >= MIN_CONTENT_LENGTH) {
 			for (let i = 0; i < win.length - 1; i++) {
 				if (win[i].content.length < MIN_CONTENT_LENGTH) continue;
 				const s = similarity(last.content, win[i].content);
-				if (s >= config.similarityThreshold) {
+				if (s >= config.similarityThreshold && !allBatch([start + i, msgs.length - 1])) {
 					out.push({
 						type: "text",
 						similarity: s,
@@ -142,7 +222,7 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 				for (let i = 0; i < opens.length - 1; i++) {
 					if (similarity(last, opens[i].o) > 0.9) n++;
 				}
-				if (n >= 2) {
+				if (n >= 2 && !allBatch([msgs.length - 1])) {
 					out.push({
 						type: "structural",
 						similarity: 0.9,
@@ -158,7 +238,9 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 	if (config.detectToolLoops) {
 		const last = win[win.length - 1];
 		const lastCalls = last.toolCalls;
-		if (lastCalls && lastCalls.length) {
+		// A message whose calls are all task-stream tools is batch work — skip
+		// it entirely (the stream gate already proved the calls are distinct).
+		if (lastCalls && lastCalls.length && !batchAt.has(msgs.length - 1)) {
 			const matched: number[] = [];
 			for (let i = 0; i < win.length - 1; i++) {
 				const prev = win[i].toolCalls;
@@ -187,7 +269,7 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 			for (let i = 0; i < win.length - 1; i++) {
 				if (win[i].thinking && win[i].thinking!.length > 50) {
 					const s = similarity(last.thinking, win[i].thinking!);
-					if (s >= config.similarityThreshold) {
+					if (s >= config.similarityThreshold && !allBatch([start + i, msgs.length - 1])) {
 						out.push({
 							type: "thinking",
 							similarity: s,
@@ -275,6 +357,68 @@ export function runSelfTest(): string[] {
 	);
 	out.push(`result same outcome  → ${sameCmdSameOut ? "match" : "no match"} (exp match — PID noise ok) ${sameCmdSameOut ? "✅" : "❌"}`);
 	out.push(`result diff outcome  → ${sameCmdDiffOut ? "match" : "no match"} (exp no match — error→success is progress) ${!sameCmdDiffOut ? "✅" : "❌"}`);
+
+	// --- task streams: extension batch work is NOT a loop ---
+	// punched_log / plan_manager / obsidian_* style tools: the model calls the
+	// SAME tool N times with DIFFERENT content ("add line 1…N", "add task 1…N").
+	// Near-identical template args (98.9% similar here) WOULD match the tool
+	// detector; the task-stream gate must suppress the whole window instead.
+	const mk = (content: string, toolCalls?: TrackedToolCall[]): TrackedMessage =>
+		({ content, toolCalls, timestamp: Date.now(), turnIndex: 0 });
+	const noteArgs = (x: string) =>
+		JSON.stringify({ type: "note", title: `task ${x}`, body: "append this line to the project memory document so context is preserved" });
+	const tcfg: AntiloopConfig = {
+		enabled: true, warningThreshold: 2, forceBreakThreshold: 3, abortThreshold: 0,
+		similarityThreshold: 0.75, toolSimilarityThreshold: 0.95, minToolRepeatCount: 2,
+		resultSimilarityThreshold: 0.8, detectToolLoops: true, detectThinkingLoops: true,
+		detectTextLoops: true, notifyOnDetection: true, maxHistoryEntries: 100,
+		detectionWindow: 10, interactiveFooter: true, toggleShortcut: "esc+a",
+		detectTaskStreams: true, taskStreamMinCalls: 3, taskStreamTwinThreshold: 0.99,
+	};
+	const asState = (recentMessages: TrackedMessage[]): AntiloopState =>
+		({ recentMessages, detections: [], activeTaskStreams: [], currentLevel: 0,
+			consecutiveDetections: 0, inForcedBreak: false, totalDetections: 0,
+			lastUserMessageTime: 0, lastDetectedTurnIndex: -1 });
+	const NARR = "Now I will append the next decision entry to the project memory document so we keep the context.";
+
+	// 1) punched_log batch: 3 DIFFERENT appends (args 98.9% similar, NOT twins)
+	//    → stream recognized, tool + text + structural all suppressed.
+	const batchMsgs = [
+		mk(NARR, [{ name: "punched_log", args: noteArgs("1") }]),
+		mk(NARR, [{ name: "punched_log", args: noteArgs("2") }]),
+		mk(NARR, [{ name: "punched_log", args: noteArgs("3") }]),
+	];
+	const batchWin = batchMsgs.slice(-tcfg.detectionWindow);
+	const batchStreams = detectTaskStreams(batchWin, tcfg);
+	const batchDet = detectLoops(asState(batchMsgs), tcfg);
+	out.push(`batch stream detected  → ${batchStreams.get("punched_log") === 3 ? `punched_log×${batchStreams.get("punched_log")}` : "no"} (exp punched_log×3) ${batchStreams.get("punched_log") === 3 ? "✅" : "❌"}`);
+	out.push(`batch no detections    → ${batchDet.length === 0 ? "silent" : `${batchDet.map((d) => d.type).join(",")}`} (exp silent — 98.9% args would match without gate) ${batchDet.length === 0 ? "✅" : "❌"}`);
+
+	// 2) genuine loop: SAME call repeated verbatim → twins → stream inactive,
+	//    tool detection must still fire.
+	const loopMsgs = [
+		mk(NARR, [{ name: "punched_log", args: noteArgs("1") }]),
+		mk(NARR, [{ name: "punched_log", args: noteArgs("1") }]),
+		mk(NARR, [{ name: "punched_log", args: noteArgs("1") }]),
+	];
+	const loopDet = detectLoops(asState(loopMsgs), tcfg);
+	out.push(`loop still detected     → ${loopDet.some((d) => d.type === "tool") ? "tool" : "no"} (exp tool — identical repeats are NOT a stream) ${loopDet.some((d) => d.type === "tool") ? "✅" : "❌"}`);
+
+	// 3) coexistence: batch tool + a genuinely repeated bash command in the
+	//    same messages → the bash loop must still be flagged.
+	const loopCmd = "cd /tmp && sleep 1 && echo retrying the same build step again and again forever";
+	const mixedMsgs = [
+		mk(NARR, [{ name: "punched_log", args: noteArgs("1") }, { name: "bash", args: loopCmd }]),
+		mk(NARR, [{ name: "punched_log", args: noteArgs("2") }, { name: "bash", args: loopCmd }]),
+		mk(NARR, [{ name: "punched_log", args: noteArgs("3") }, { name: "bash", args: loopCmd }]),
+	];
+	const mixedDet = detectLoops(asState(mixedMsgs), tcfg);
+	out.push(`loop survives batch gate→ ${mixedDet.some((d) => d.type === "tool") ? "tool" : "no"} (exp tool — bash repeats are real) ${mixedDet.some((d) => d.type === "tool") ? "✅" : "❌"}`);
+
+	// 4) below min calls: 2 distinct appends → no stream (could be coincidence).
+	const twoMsgs = [mk("a", [{ name: "punched_log", args: noteArgs("1") }]), mk("b", [{ name: "punched_log", args: noteArgs("2") }])];
+	const twoStreams = detectTaskStreams(twoMsgs, tcfg);
+	out.push(`stream needs ≥3 calls   → ${twoStreams.size === 0 ? "no stream" : "stream"} (exp no stream at 2 calls) ${twoStreams.size === 0 ? "✅" : "❌"}`);
 
 	return out;
 }

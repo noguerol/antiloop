@@ -59,10 +59,14 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		`  similarity: ${(rt.config.similarityThreshold * 100).toFixed(0)}%  window: ${rt.config.detectionWindow}`,
 		`  tool sim: ${(rt.config.toolSimilarityThreshold * 100).toFixed(0)}%  tool repeat: ${rt.config.minToolRepeatCount}+ prior`,
 		`  result sim: ${(rt.config.resultSimilarityThreshold * 100).toFixed(0)}%  (same cmd + diff outcome = no loop)`,
+		`  task streams: ${yn(rt.config.detectTaskStreams)} (min ${rt.config.taskStreamMinCalls} calls, twins ≥ ${(rt.config.taskStreamTwinThreshold * 100).toFixed(0)}%)`,
 		"",
 		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)}`,
 		`footer: interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
 	];
+	if (rt.state.activeTaskStreams.length) {
+		lines.push("", `active batch: ${rt.state.activeTaskStreams.map((x) => `${x.tool}×${x.count}`).join(", ")}`);
+	}
 	if (recent.length) {
 		lines.push("", "recent:");
 		for (const d of recent) lines.push(`  [${d.type}] ${d.description} · ${formatDuration(Date.now() - d.timestamp)} ago`);
@@ -81,6 +85,9 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "toolSim" as const, label: `tool similarity: ${(c.toolSimilarityThreshold * 100).toFixed(0)}%`, description: "args must match this closely to count as the same call" },
 		{ value: "toolRepeat" as const, label: `tool repeat: ${c.minToolRepeatCount}+ prior`, description: "recurrences before a tool loop flags" },
 		{ value: "resultSim" as const, label: `result similarity: ${(c.resultSimilarityThreshold * 100).toFixed(0)}%`, description: "same cmd + different outcome vetoes the loop" },
+		{ value: "streams" as const, label: `task streams: ${yn(c.detectTaskStreams)}`, description: "batch work via extensions (punched_log / plan_manager / …) is not a loop" },
+		{ value: "streamMin" as const, label: `stream min calls: ${c.taskStreamMinCalls}`, description: "same tool calls required before batch recognition kicks in" },
+		{ value: "streamTwin" as const, label: `stream twin threshold: ${(c.taskStreamTwinThreshold * 100).toFixed(0)}%`, description: "args this similar = same task repeated → not a stream" },
 		{ value: "window" as const, label: `window: ${c.detectionWindow} msgs` },
 		{ value: "text" as const, label: `text detect: ${yn(c.detectTextLoops)}` },
 		{ value: "tool" as const, label: `tool detect: ${yn(c.detectToolLoops)}` },
@@ -169,6 +176,28 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 			if (v !== undefined) { c.resultSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`result similarity: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
+		case "streams":
+			c.detectTaskStreams = !c.detectTaskStreams; saveConfig(c);
+			ctx.ui.notify(`task streams: ${yn(c.detectTaskStreams)}`, "info"); break;
+		case "streamMin": {
+			const v = await selectFrom(ctx, "stream min calls", [
+				{ value: 2, label: "2 (sensitive)" },
+				{ value: 3, label: "3 (default)" },
+				{ value: 4, label: "4" },
+				{ value: 5, label: "5 (conservative)" },
+			]);
+			if (v !== undefined) { c.taskStreamMinCalls = v; saveConfig(c); ctx.ui.notify(`stream min calls: ${v}`, "info"); }
+			break;
+		}
+		case "streamTwin": {
+			const v = await selectFrom(ctx, "stream twin threshold (args)", [
+				{ value: 0.99, label: "99% (default — any real difference = distinct task)" },
+				{ value: 0.95, label: "95% (near-identical args count as same task)" },
+				{ value: 0.9, label: "90% (aggressive loop detection)" },
+			]);
+			if (v !== undefined) { c.taskStreamTwinThreshold = v; saveConfig(c); ctx.ui.notify(`stream twin threshold: ${(v * 100).toFixed(0)}%`, "info"); }
+			break;
+		}
 		case "window": {
 			const v = await selectFrom(ctx, "window", [
 				{ value: 5, label: "5" },
@@ -230,6 +259,7 @@ async function showLog(ctx: ExtensionCommandContext, rt: Runtime): Promise<void>
 export function resetState(state: AntiloopState): void {
 	state.recentMessages = [];
 	state.detections = [];
+	state.activeTaskStreams = [];
 	state.currentLevel = 0;
 	state.consecutiveDetections = 0;
 	state.inForcedBreak = false;

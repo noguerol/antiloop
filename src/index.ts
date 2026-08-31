@@ -16,6 +16,7 @@ function newState(): AntiloopState {
 	return {
 		recentMessages: [],
 		detections: [],
+		activeTaskStreams: [],
 		currentLevel: 0,
 		consecutiveDetections: 0,
 		inForcedBreak: false,
@@ -42,11 +43,19 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	/** TUI handle for forcing footer re-renders (set by the footer factory). */
 	let activeTui: { requestRender(force?: boolean): void } | undefined;
 
-	/** Status text shown in the footer: "(emoji_antiloop)(on/off)" per spec. */
+	/** Status text shown in the footer: "(emoji_antiloop)(on/off)" per spec,
+	 * plus active batch streams so a quiet antiloop is explainable. */
 	function antiloopStatusText(): string {
 		if (!config.enabled) return "🔄 antiloop(off)";
-		if (state.currentLevel === 0) return "🔄 antiloop(on)";
-		return `${ICONS[state.currentLevel]} antiloop(on)×${state.consecutiveDetections}`;
+		const base =
+			state.currentLevel === 0
+				? "🔄 antiloop(on)"
+				: `${ICONS[state.currentLevel]} antiloop(on)×${state.consecutiveDetections}`;
+		if (state.activeTaskStreams.length) {
+			const s = state.activeTaskStreams.map((x) => `${x.tool}×${x.count}`).join(", ");
+			return `${base} · batch: ${s}`;
+		}
+		return base;
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
@@ -266,7 +275,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 
 	pi.on("turn_end", async (event, ctx) => {
 		if (!config.enabled) return;
-		const { detectLoops, interventionMessage, resultFingerprint } = await import("./detect.ts");
+		const { detectLoops, detectTaskStreams, interventionMessage, resultFingerprint } = await import("./detect.ts");
 
 		const last = state.recentMessages[state.recentMessages.length - 1];
 		// A turn whose assistant message wasn't tracked (short text, no tools)
@@ -291,6 +300,14 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 				}
 			}
 		}
+
+		// Recomputed batch streams (punched_log / plan_manager / … used as a
+		// homogeneous task stream) — shown in the footer so the user sees why
+		// antiloop stays quiet while the model performs N tasks of one type.
+		const winStart = Math.max(0, state.recentMessages.length - config.detectionWindow);
+		state.activeTaskStreams = Array.from(
+			detectTaskStreams(state.recentMessages.slice(winStart), config).entries(),
+		).map(([tool, count]) => ({ tool, count }));
 
 		const detections = detectLoops(state, config);
 		processDetections(detections, interventionMessage);
