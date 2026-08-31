@@ -1,7 +1,7 @@
 {
   "name": "pi-antiloop",
-  "version": "1.2.0",
-  "description": "Antiloop: detect reasoning loops and force a break (warn → force → abort) across text, tool, thinking, and structural patterns. Tool-loop detection is result-aware: only near-identical repeated calls with the same outcome count, so sequential bash operations and retries that make progress don't false-positive.",
+  "version": "1.3.0",
+  "description": "Antiloop: detect reasoning loops and force a break (warn → force → abort) across text, tool, thinking, and structural patterns. Tool-loop detection is result-aware: only near-identical repeated calls with the same outcome count, so sequential bash operations and retries that make progress don't false-positive. Task-stream recognition: when an extension (punched, plan, …) makes the model call the SAME tool many times with DIFFERENT content — N distinct tasks of one type, e.g. appending lines or adding plan tasks — antiloop stays silent.",
   "keywords": [
     "pi-package",
     "antiloop",

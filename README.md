@@ -13,6 +13,7 @@
 ## Features
 
 - **Four detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + near-identical arguments + same outcome — result-aware, so retries that make progress don't false-positive), thinking blocks, and structural opening-phrase patterns
+- **Task-stream recognition (batch work)** — when another extension (e.g. `punched` appending lines to pi.md, or `plan` adding tasks) makes the model call the *same* tool many times with *different* content, antiloop recognizes it as N distinct tasks of one type and stays silent — no warning, no force break. A genuine loop (the *same* call repeated verbatim) is still caught
 - **Progressive intervention** — `warning` reminds the model to vary its approach; `force break` injects explicit anti-loop instructions and modifies context; `abort` stops the run entirely
 - **Configurable thresholds** — independent dials for similarity cutoff, warning/force-break/abort counts, detection window, and which strategies are on
 - **Sliding window** — only the last N messages are compared, so detection is O(N) in the window size, not in the full session
@@ -115,6 +116,9 @@ Interactive menu with current values:
 - **Tool similarity** — `0.99 / 0.95 / 0.9 / 0.8` — how close tool-call *arguments* must be to count as the same call (95% default: only near-identical repeats loop)
 - **Tool repeat** — `1 / 2 / 3` — prior occurrences of the same call set required before a tool loop flags
 - **Result similarity** — `0.95 / 0.8 / 0.6` — how similar captured results must be to count as the *same outcome* (veto when a repeated command starts succeeding/differing)
+- **Task streams** — on/off — recognize homogeneous batch work (same extension tool, distinct content) as N tasks of one type, not a loop
+- **Stream min calls** — `2 / 3 / 4 / 5` — same-tool calls required inside the window before batch recognition kicks in (default 3)
+- **Stream twin threshold** — `99% / 95% / 90%` — arguments this similar count as the *same task*; a twin invalidates the stream and re-enables normal detection (default 99%)
 - **Detection window** — `5 / 10 / 15 / 20` — number of recent messages to analyze
 - **Per-strategy toggles** — text / tool / thinking detection
 - **Notifications** — show detection notifications
@@ -139,6 +143,11 @@ tool different tool → no match (exp no match) ✅
 tool empty lists    → no match (exp no match) ✅
 result same outcome  → match (exp match — PID noise ok) ✅
 result diff outcome  → no match (exp no match — error→success is progress) ✅
+batch stream detected  → punched_log×3 (exp punched_log×3) ✅   ← task streams: N tasks of one type
+batch no detections    → silent (exp silent — 98.9% args would match without gate) ✅
+loop still detected     → tool (exp tool — identical repeats are NOT a stream) ✅
+loop survives batch gate→ tool (exp tool — bash repeats are real) ✅
+stream needs ≥3 calls   → no stream (exp no stream at 2 calls) ✅
 ```
 
 ## How It Works
@@ -153,6 +162,7 @@ After every assistant `message_end` event, antiloop extracts the new content (te
 | Tool | Tool name + arguments (+ captured result) | Sequence match + near-identical args (≥ `toolSimilarityThreshold`, default 95%) *and* ≥ `minToolRepeatCount` prior recurrences. **Result veto:** if both runs captured a result and the outcomes differ, it's progress, not a loop |
 | Thinking | Internal reasoning/thinking blocks | Same as text |
 | Structural | First 10 words of each message | Opening-phrase similarity ≥ 90% across ≥ 3 messages |
+| Task stream | Same tool, many calls | When a tool appears ≥ `taskStreamMinCalls` times (default 3) in the window and *no two* calls are near-identical (`taskStreamTwinThreshold`, default 99%), the tool is an active batch: N different tasks of one type (e.g. `punched_log` appends, `plan_manager` task adds). Those calls are exempt from tool-loop detection, and text/thinking/structural patterns that only involve those batch messages are suppressed too. If even one call pair is a twin (the same task repeated), the tool is *not* a stream and detection proceeds normally |
 
 Each detected pair becomes a `LoopDetection { type, similarity, messageIndices, description }` and the consecutive counter increases.
 
@@ -206,6 +216,40 @@ If the same command produced a *different* outcome, the pair is progress:
 
 Results only veto; they never trigger on their own, and calls without a
 captured result fall back to argument matching alone.
+
+### Task streams: N tasks of one type ≠ a loop
+
+Extensions push homogeneous work into the model's hands. `punched` appends
+lines to pi.md one at a time; `plan` adds tasks one at a time; `obsidian_*`
+writes/edits notes file by file. Each call is a *different* task — "add line 1",
+"add line 2", "add line 3" — of the *same type*, and the narration around it
+sounds similar ("now appending the next entry…"). That is not a reasoning
+loop; flagging it would interrupt legitimate multi-step work.
+
+Antiloop recognizes this as a **task stream**: if the same tool name appears at
+least `taskStreamMinCalls` times (default 3) inside the detection window and
+no two calls are "twins" (arguments ≥ `taskStreamTwinThreshold` similar,
+default 99% — any real content difference counts as a distinct task), the
+tool is treated as an active batch:
+
+- tool-loop detection skips messages whose calls are all stream tools;
+- text / thinking / structural detections that only involve those batch
+  messages are suppressed (identical narration while adding N entries is
+  expected, not looping);
+- the footer shows it: `🔄 antiloop(on) · batch: punched_log×4`.
+
+Crucially, the exemption requires **no twins**: the moment the same call
+repeats verbatim (or near-verbatim), the stream is invalid and normal loop
+detection takes over — so a model stuck re-logging the *same* line still gets
+caught. The check is name-agnostic: any extension tool used as a batch is
+covered, no allow-list needed. If a genuine loop coexists with a batch (e.g.
+the same `bash` command re-run while appending different notes), the loop is
+still flagged.
+
+Tunables: `detectTaskStreams` (master switch), `taskStreamMinCalls` (batch
+size needed before recognition), `taskStreamTwinThreshold` (how similar args
+must be to count as *the same task* — lower it to treat near-duplicate
+entries as loops again).
 ```
 
 ### Sliding window
@@ -226,6 +270,9 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
   "toolSimilarityThreshold": 0.95,
   "minToolRepeatCount": 2,
   "resultSimilarityThreshold": 0.8,
+  "detectTaskStreams": true,
+  "taskStreamMinCalls": 3,
+  "taskStreamTwinThreshold": 0.99,
   "detectToolLoops": true,
   "detectThinkingLoops": true,
   "detectTextLoops": true,
@@ -247,6 +294,9 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 | `toolSimilarityThreshold` | `0.95` | How close tool-call arguments must be (0.0–1.0) to count as the *same* call — see [tool loops](#how-it-works) |
 | `minToolRepeatCount` | `2` | Prior occurrences of a near-identical call set required before a tool loop is flagged (2 = same call seen 3×) |
 | `resultSimilarityThreshold` | `0.8` | Minimum similarity between captured result tails to still count as the *same outcome*; below this, a repeated command is treated as progress, not a loop |
+| `detectTaskStreams` | `true` | Recognize homogeneous batch work (same tool called with distinct content — e.g. punched/plan/obsidian extensions) and stay silent; see [task streams](#task-streams-n-tasks-of-one-type--a-loop) |
+| `taskStreamMinCalls` | `3` | Same-tool calls required inside the window before a task stream is recognized |
+| `taskStreamTwinThreshold` | `0.99` | Arguments this similar (or identical) count as *the same task* — a twin invalidates the stream and re-enables normal loop detection |
 | `detectTextLoops` | `true` | Detect full-text repetition |
 | `detectToolLoops` | `true` | Detect tool-call sequence + argument repetition |
 | `detectThinkingLoops` | `true` | Detect repeated thinking/reasoning content |
