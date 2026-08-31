@@ -61,6 +61,7 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		`  result sim: ${(rt.config.resultSimilarityThreshold * 100).toFixed(0)}%  (same cmd + diff outcome = no loop)`,
 		"",
 		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)}`,
+		`footer: interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
 	];
 	if (recent.length) {
 		lines.push("", "recent:");
@@ -85,6 +86,8 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "tool" as const, label: `tool detect: ${yn(c.detectToolLoops)}` },
 		{ value: "think" as const, label: `think detect: ${yn(c.detectThinkingLoops)}` },
 		{ value: "notify" as const, label: `notify: ${yn(c.notifyOnDetection)}` },
+		{ value: "footer" as const, label: `interactive footer: ${yn(c.interactiveFooter)}`, description: "TUI footer with toggle shortcut" },
+		{ value: "shortcut" as const, label: `toggle shortcut: ${c.toggleShortcut}`, description: "esc+a or off" },
 		{ value: "reset" as const, label: "reset state" },
 	]);
 	if (!picked) return;
@@ -188,6 +191,20 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		case "notify":
 			c.notifyOnDetection = !c.notifyOnDetection; saveConfig(c);
 			ctx.ui.notify(`notify: ${yn(c.notifyOnDetection)}`, "info"); break;
+		case "footer":
+			c.interactiveFooter = !c.interactiveFooter; saveConfig(c);
+			ctx.ui.notify(`interactive footer: ${yn(c.interactiveFooter)}`, "info");
+			rt.refreshFooter?.(ctx);
+			rt.updateStatus(ctx);
+			break;
+		case "shortcut": {
+			const v = await selectFrom(ctx, "toggle shortcut", [
+				{ value: "esc+a" as const, label: "esc+a (default)", description: "press ESC then a to toggle" },
+				{ value: "off" as const, label: "off", description: "disable keyboard toggle" },
+			]);
+			if (v !== undefined) { c.toggleShortcut = v; saveConfig(c); rt.refreshFooter?.(ctx); ctx.ui.notify(`toggle shortcut: ${v}`, "info"); }
+			break;
+		}
 		case "reset":
 			resetState(rt.state);
 			rt.pendingIntervention = null;

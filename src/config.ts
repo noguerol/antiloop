@@ -22,6 +22,8 @@ export const DEFAULT_CONFIG: AntiloopConfig = {
 	notifyOnDetection: true,
 	maxHistoryEntries: 100,
 	detectionWindow: 10,
+	interactiveFooter: true,
+	toggleShortcut: "esc+a",
 };
 
 export function getConfigPath(): string {

@@ -1,14 +1,16 @@
 /**
  * antiloop — detect reasoning loops and intervene.
- * Hooks: message_end, input, before_agent_start, context, turn_end, session_start.
+ * Hooks: message_end, input, before_agent_start, context, turn_end, session_start, session_shutdown.
  * Commands: /antiloop [enable|disable|status|config|log|reset|test]
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig } from "./config.ts";
+import { truncateToWidth } from "@earendil-works/pi-tui";
+import { loadConfig, saveConfig } from "./config.ts";
 import type { AntiloopState, LoopDetection, Runtime, TrackedToolCall } from "./types.ts";
 
 const ICONS = ["", "⚠️", "🛑", "🚨"] as const;
+const LEVEL_NAMES = ["", "warning", "force", "abort"] as const;
 
 function newState(): AntiloopState {
 	return {
@@ -23,22 +25,50 @@ function newState(): AntiloopState {
 	};
 }
 
+/** Compact pwd: ~-relative when inside $HOME, with trailing separator trimmed. */
+function formatCwd(cwd: string): string {
+	const home = process.env.HOME;
+	if (home && cwd.startsWith(home)) {
+		const rel = cwd.slice(home.length).replace(/^[/\\]+/, "");
+		return rel ? `~/${rel}` : "~";
+	}
+	return cwd;
+}
+
 export default function antiloopExtension(pi: ExtensionAPI) {
 	const config = loadConfig();
 	let state = newState();
 
-	function updateStatus(ctx: ExtensionContext): void {
-		if (!config.enabled) ctx.ui.setStatus("antiloop", undefined);
-		else if (state.currentLevel === 0) ctx.ui.setStatus("antiloop", "🔄 antiloop");
-		else ctx.ui.setStatus("antiloop", `${ICONS[state.currentLevel]} antiloop(${state.consecutiveDetections})`);
+	/** TUI handle for forcing footer re-renders (set by the footer factory). */
+	let activeTui: { requestRender(force?: boolean): void } | undefined;
+
+	/** Status text shown in the footer: "(emoji_antiloop)(on/off)" per spec. */
+	function antiloopStatusText(): string {
+		if (!config.enabled) return "🔄 antiloop(off)";
+		if (state.currentLevel === 0) return "🔄 antiloop(on)";
+		return `${ICONS[state.currentLevel]} antiloop(on)×${state.consecutiveDetections}`;
 	}
 
-	const rt: Runtime = { config, state, pendingIntervention: null, updateStatus };
+	function updateStatus(ctx: ExtensionContext): void {
+		// Always set a status line so the footer shows on/off either way.
+		ctx.ui.setStatus("antiloop", antiloopStatusText());
+		activeTui?.requestRender();
+	}
+
+	const rt: Runtime = { config, state, pendingIntervention: null, updateStatus, refreshFooter: installFooter };
 	const setPending = (v: string | null) => { rt.pendingIntervention = v; };
+
+	/** Toggle enable/disable, persisting config and refreshing the footer. */
+	function toggleEnabled(ctx: ExtensionContext): void {
+		config.enabled = !config.enabled;
+		saveConfig(config);
+		ctx.ui.notify(`antiloop: ${config.enabled ? "ON" : "OFF"}`, "info");
+		updateStatus(ctx);
+	}
 
 	function processDetections(
 		detections: LoopDetection[],
-		interventionMessage: (level: 1 | 2 | 3, d: LoopDetection[]) => string,
+		interventionMessage: (level: 2 | 3, d: LoopDetection[]) => string,
 	): void {
 		if (!detections.length) {
 			if (state.consecutiveDetections > 0) state.consecutiveDetections = Math.max(0, state.consecutiveDetections - 1);
@@ -59,10 +89,107 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		else if (state.consecutiveDetections >= config.warningThreshold) next = 1;
 		if (next > state.currentLevel) state.currentLevel = next;
 
-		if (state.currentLevel > 0) {
-			setPending(interventionMessage(state.currentLevel as 1 | 2 | 3, detections));
-			state.inForcedBreak = state.currentLevel >= 2;
+		// Warning (level 1) is informational only: notify the user but DO NOT
+		// inject any message into the conversation. Injecting at warning level
+		// made the model respond to the warning, which could stall generation
+		// even though hard-kill turns remained. Only force (2) / abort (3) inject.
+		if (state.currentLevel >= 2) {
+			setPending(interventionMessage(state.currentLevel as 2 | 3, detections));
+			state.inForcedBreak = true;
+		} else if (state.currentLevel === 1) {
+			state.inForcedBreak = false;
 		}
+	}
+
+	// ------------------------------------------------------------------
+	// Interactive footer (TUI). Replaces the built-in footer with a line
+	// per spec — "🔄 antiloop(on|off)" — plus live detection info, a
+	// keyboard toggle (esc+a by default, configurable/off), and the
+	// built-in footer's useful data (pwd, branch, ctx %, model) preserved.
+	// ------------------------------------------------------------------
+	function installFooter(ctx: ExtensionContext): void {
+		if (!config.interactiveFooter || ctx.mode !== "tui") {
+			ctx.ui.setFooter(undefined);
+			return;
+		}
+		ctx.ui.setFooter((tui, theme, footerData) => {
+			activeTui = tui;
+
+			// Keyboard toggle from raw terminal input: escape followed by `a`.
+			// We never consume the input, so typing is unaffected — ESC alone
+			// passes through, and an accidental toggle is easily reversed.
+			let pendingEsc = false;
+			const shortcut = config.toggleShortcut;
+			const unsubInput =
+				shortcut === "off"
+					? undefined
+					: ctx.ui.onTerminalInput?.((data: string) => {
+							if (config.toggleShortcut === "off") return undefined;
+							if (data === "\x1b") {
+								pendingEsc = true;
+								return undefined;
+							}
+							if (pendingEsc && data === "a") {
+								pendingEsc = false;
+								toggleEnabled(ctx);
+								return undefined;
+							}
+							pendingEsc = false;
+							return undefined;
+					  });
+
+			return {
+				dispose() {
+					unsubInput?.();
+					if (activeTui === tui) activeTui = undefined;
+				},
+				invalidate() {},
+				render(width: number): string[] {
+					const lines: string[] = [];
+
+					// Line 1: the spec indicator + toggle hint.
+					const status = antiloopStatusText();
+					const colored = config.enabled ? theme.fg("accent", status) : theme.fg("dim", status);
+					const hint =
+						config.toggleShortcut !== "off"
+							? theme.fg("dim", `  [${config.toggleShortcut}] toggle`)
+							: theme.fg("dim", "  [/antiloop] toggle");
+					lines.push(truncateToWidth(colored + hint, width));
+
+					// Line 2 (only while detecting): level + consecutive + last reason.
+					if (state.currentLevel > 0) {
+						const last = state.detections[state.detections.length - 1];
+						const desc = last ? ` · ${last.description}` : "";
+						lines.push(
+							truncateToWidth(
+								theme.fg("warning", `${LEVEL_NAMES[state.currentLevel]} ×${state.consecutiveDetections}${desc}`),
+								width,
+							),
+						);
+					}
+
+					// Line 3: built-in footer data preserved (dim).
+					let info = formatCwd(ctx.cwd);
+					const branch = footerData.getGitBranch();
+					if (branch) info += ` (${branch})`;
+					const usage = ctx.getContextUsage();
+					const cw = usage?.contextWindow ?? ctx.model?.contextWindow;
+					if (cw && usage && usage.percent !== null) info += ` · ctx ${Math.round(usage.percent)}%`;
+					if (ctx.model) info += ` · ${ctx.model.id}`;
+					lines.push(truncateToWidth(theme.fg("dim", info), width));
+
+					// Line 4 (only when other extensions set statuses): keep them visible.
+					const others = Array.from(footerData.getExtensionStatuses().entries())
+						.filter(([k]) => k !== "antiloop")
+						.map(([, v]) => v);
+					if (others.length) {
+						lines.push(truncateToWidth(theme.fg("dim", others.join("  ")), width));
+					}
+
+					return lines;
+				},
+			};
+		});
 	}
 
 	pi.on("message_end", async (event) => {
@@ -180,7 +307,15 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		Object.assign(config, loadConfig());
 		state = newState();
 		rt.pendingIntervention = null;
+		installFooter(ctx);
 		updateStatus(ctx);
+	});
+
+	pi.on("session_shutdown", async (_e, ctx) => {
+		// Restore the built-in footer on shutdown (in case another extension
+		// installs its own footer later, or the TUI is torn down).
+		ctx.ui.setFooter(undefined);
+		activeTui = undefined;
 	});
 
 	pi.registerCommand("antiloop", {
@@ -195,5 +330,3 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		},
 	});
 }
-
-

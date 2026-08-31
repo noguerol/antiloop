@@ -16,7 +16,7 @@
 - **Progressive intervention** — `warning` reminds the model to vary its approach; `force break` injects explicit anti-loop instructions and modifies context; `abort` stops the run entirely
 - **Configurable thresholds** — independent dials for similarity cutoff, warning/force-break/abort counts, detection window, and which strategies are on
 - **Sliding window** — only the last N messages are compared, so detection is O(N) in the window size, not in the full session
-- **Live status bar** — `🔄 antiloop`, `⚠️ antiloop(N)`, `🛑 antiloop(N)`, `🚨 antiloop(N)` reflect the current intervention level
+- **Live footer indicator** — `🔄 antiloop(on|off)` in the footer, per spec, with the current level (`⚠️/🛑/🚨`) and consecutive count; an interactive TUI footer adds a keyboard toggle (`esc+a` by default, configurable/off) and preserves the built-in footer's pwd/branch/context/model info
 - **Detection log** — timestamped history with similarity scores, filterable through the native pi menu
 - **Self-test** — `/antiloop test` runs built-in cases to verify the similarity engine is calibrated
 - **User input softens detection** — each new user message decays the consecutive counter so a fresh prompt can resolve the loop without manual reset
@@ -161,7 +161,7 @@ Each detected pair becomes a `LoopDetection { type, similarity, messageIndices, 
 | Level | Trigger | Behavior |
 |-------|---------|----------|
 | 0 (no loop) | — | Silent — passes the message through |
-| 1 (warning) | `consecutiveDetections >= warningThreshold` | Injects a soft reminder asking the model to vary its approach |
+| 1 (warning) | `consecutiveDetections >= warningThreshold` | Notifies the user (`⚠️`) — no message is injected into the conversation, so the model's generation is never interrupted by the warning itself |
 | 2 (force break) | `consecutiveDetections >= forceBreakThreshold` | Injects mandatory anti-loop instructions + appends a context message to the last assistant message |
 | 3 (abort) | `consecutiveDetections >= abortThreshold` | (Disabled by default) Surfaces an error asking the user for new instructions |
 
@@ -231,7 +231,9 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
   "detectTextLoops": true,
   "notifyOnDetection": true,
   "maxHistoryEntries": 100,
-  "detectionWindow": 10
+  "detectionWindow": 10,
+  "interactiveFooter": true,
+  "toggleShortcut": "esc+a"
 }
 ```
 
@@ -251,6 +253,8 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 | `notifyOnDetection` | `true` | Show a notification on every detection |
 | `maxHistoryEntries` | `100` | Max detection history entries |
 | `detectionWindow` | `10` | Number of recent messages to analyze |
+| `interactiveFooter` | `true` | TUI footer replaces the built-in one with an antiloop indicator + toggle shortcut (set `false` to keep the built-in footer and only the `setStatus` line) |
+| `toggleShortcut` | `esc+a` | Key sequence that toggles antiloop from the footer (`esc+a` or `off`). The input is never consumed, so typing is unaffected |
 
 ## Best Practices
 
@@ -286,8 +290,8 @@ Modular extension with zero external dependencies (only pi's bundled `@earendil-
 - **Levenshtein + trigram Jaccard** hybrid — small texts use edit distance, large texts use n-gram overlap (each is O(N) in text length)
 - **Sliding window** — only the last `detectionWindow` messages participate, capping memory at O(W × message_size)
 - **Early bail** — short messages and empty tool calls skip similarity computation entirely
-- **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` for the persistent status bar
-- **Hooks** — `message_end` (track messages + tool call ids), `turn_end` (attach result fingerprints + detect), `input` (decay), `before_agent_start` (inject intervention), `context` (modify context in force-break mode), `session_start` (load config + reset)
+- **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` + a custom `ctx.ui.setFooter` component for the persistent footer indicator, live level info, and the `esc+a` keyboard toggle (`ctx.ui.onTerminalInput`, never consumes input)
+- **Hooks** — `message_end` (track messages + tool call ids), `turn_end` (attach result fingerprints + detect), `input` (decay), `before_agent_start` (inject intervention — force/abort only), `context` (modify context in force-break mode), `session_start` (load config + install footer + reset), `session_shutdown` (restore built-in footer)
 
 ## License
 
