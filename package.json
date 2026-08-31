@@ -1,6 +1,6 @@
 {
   "name": "pi-antiloop",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Antiloop: detect reasoning loops and force a break (warn → force → abort) across text, tool, thinking, and structural patterns. Tool-loop detection is result-aware: only near-identical repeated calls with the same outcome count, so sequential bash operations and retries that make progress don't false-positive.",
   "keywords": [
     "pi-package",

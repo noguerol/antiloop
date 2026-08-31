@@ -31,6 +31,17 @@ export interface AntiloopConfig {
 	notifyOnDetection: boolean;
 	maxHistoryEntries: number;
 	detectionWindow: number;
+	/**
+	 * Show the antiloop indicator as a custom interactive footer in TUI mode
+	 * (replaces the built-in footer). When false, the indicator is still shown
+	 * as a status line in the built-in footer via ctx.ui.setStatus.
+	 */
+	interactiveFooter: boolean;
+	/**
+	 * Key sequence that toggles antiloop from the footer (raw terminal input).
+	 * Format: "esc+a" (escape followed by `a`) or "off" to disable.
+	 */
+	toggleShortcut: string;
 }
 
 export type LoopKind = "text" | "tool" | "thinking" | "structural";
@@ -81,4 +92,6 @@ export interface Runtime {
 	state: AntiloopState;
 	pendingIntervention: string | null;
 	updateStatus(ctx: ExtensionContext): void;
+	/** Re-install the interactive footer (after config changes). */
+	refreshFooter?(ctx: ExtensionContext): void;
 }
