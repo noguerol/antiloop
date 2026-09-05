@@ -25,7 +25,11 @@ export const DEFAULT_CONFIG: AntiloopConfig = {
 	notifyOnDetection: true,
 	maxHistoryEntries: 100,
 	detectionWindow: 10,
-	interactiveFooter: true,
+	// Custom footer replaces the built-in one while active. Off by default:
+	// pi restores its own footer right after boot anyway, so installing a
+	// look-alike at session_start only produced a transient duplicated-footer
+	// artifact. The 🔄 on/off status still shows via setStatus in the built-in footer.
+	interactiveFooter: false,
 	toggleShortcut: "esc+a",
 };
 
