@@ -43,19 +43,9 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	/** TUI handle for forcing footer re-renders (set by the footer factory). */
 	let activeTui: { requestRender(force?: boolean): void } | undefined;
 
-	/** Status text shown in the footer: "(emoji_antiloop)(on/off)" per spec,
-	 * plus active batch streams so a quiet antiloop is explainable. */
+	/** Status text shown in the footer: "🔄 a:on" / "🔄 a:off" per spec. */
 	function antiloopStatusText(): string {
-		if (!config.enabled) return "🔄 antiloop(off)";
-		const base =
-			state.currentLevel === 0
-				? "🔄 antiloop(on)"
-				: `${ICONS[state.currentLevel]} antiloop(on)×${state.consecutiveDetections}`;
-		if (state.activeTaskStreams.length) {
-			const s = state.activeTaskStreams.map((x) => `${x.tool}×${x.count}`).join(", ");
-			return `${base} · batch: ${s}`;
-		}
-		return base;
+		return config.enabled ? "🔄 a:on" : "🔄 a:off";
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
