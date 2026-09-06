@@ -78,29 +78,29 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 	const c = rt.config;
 	const picked = await selectFrom(ctx, "⚙️ antiloop config", [
 		// ── 🎛️ General ──────────────────────────────────────────────
-		{ value: "toggle" as const, label: c.enabled ? "🟢 desactivar" : "🔴 activar", description: "enciende o apaga la detección" },
-		{ value: "window" as const, label: `⏳ ventana: ${c.detectionWindow} msgs`, description: "cuántos mensajes recientes se analizan" },
-		{ value: "notify" as const, label: `🔔 avisos: ${yn(c.notifyOnDetection)}`, description: "avisa cuando detecta un bucle" },
-		{ value: "footer" as const, label: `📊 pie interactivo: ${yn(c.interactiveFooter)}`, description: "experimental: reemplaza el pie de pi y captura el teclado (si da problemas, déjalo en off)" },
-		{ value: "shortcut" as const, label: `⌨️ atajo: ${c.toggleShortcut}`, description: "esc+a o desactivado" },
-		// ── 🎯 Detección ────────────────────────────────────────────
-		{ value: "warn" as const, label: `⚠️ umbral aviso: ${c.warningThreshold}`, description: "repeticiones antes de avisar" },
-		{ value: "force" as const, label: `🛑 umbral corte: ${c.forceBreakThreshold}`, description: "repeticiones antes de forzar un cambio de rumbo" },
-		{ value: "abort" as const, label: `🚨 umbral abortar: ${c.abortThreshold || "off"}`, description: "repeticiones antes de abortar (0 = desactivado)" },
-		{ value: "sim" as const, label: `📏 parecido mínimo: ${(c.similarityThreshold * 100).toFixed(0)}%`, description: "qué tan parecidos deben ser dos mensajes para contar como bucle" },
-		{ value: "toolSim" as const, label: `🔧 parecido de llamadas: ${(c.toolSimilarityThreshold * 100).toFixed(0)}%`, description: "qué tan idénticas deben ser las llamadas para contar como la misma" },
-		{ value: "toolRepeat" as const, label: `🔁 repeticiones de llamada: ${c.minToolRepeatCount}+`, description: "cuántas veces se repite la misma llamada antes de marcarla" },
-		{ value: "resultSim" as const, label: `🧾 parecido de resultados: ${(c.resultSimilarityThreshold * 100).toFixed(0)}%`, description: "mismo comando + resultado distinto = progreso, no bucle" },
+		{ value: "toggle" as const, label: c.enabled ? "🟢 disable" : "🔴 enable", description: "turn detection on or off" },
+		{ value: "window" as const, label: `⏳ window: ${c.detectionWindow} msgs`, description: "how many recent messages are analyzed" },
+		{ value: "notify" as const, label: `🔔 notifications: ${yn(c.notifyOnDetection)}`, description: "show a warning when a loop is detected" },
+		{ value: "footer" as const, label: `📊 interactive footer: ${yn(c.interactiveFooter)}`, description: "experimental: replaces pi's footer and captures keystrokes (leave off if it misbehaves)" },
+		{ value: "shortcut" as const, label: `⌨️ shortcut: ${c.toggleShortcut}`, description: "keys to toggle on/off without typing a command" },
+		// ── 🎯 Detection ────────────────────────────────────────────
+		{ value: "warn" as const, label: `⚠️ warn after: ${c.warningThreshold}`, description: "repetitions before antiloop warns you" },
+		{ value: "force" as const, label: `🛑 force break after: ${c.forceBreakThreshold}`, description: "repetitions before forcing a change of approach" },
+		{ value: "abort" as const, label: `🚨 abort after: ${c.abortThreshold || "off"}`, description: "repetitions before aborting (0 = disabled)" },
+		{ value: "sim" as const, label: `📏 text similarity: ${(c.similarityThreshold * 100).toFixed(0)}%`, description: "how similar two messages must be to count as a loop" },
+		{ value: "toolSim" as const, label: `🔧 call similarity: ${(c.toolSimilarityThreshold * 100).toFixed(0)}%`, description: "how identical tool calls must be to count as the same call" },
+		{ value: "toolRepeat" as const, label: `🔁 call repeats: ${c.minToolRepeatCount}+`, description: "how many times the same call must repeat before it flags" },
+		{ value: "resultSim" as const, label: `🧾 result similarity: ${(c.resultSimilarityThreshold * 100).toFixed(0)}%`, description: "same command + different result = progress, not a loop" },
 		// ── 📋 Task streams ─────────────────────────────────────────
-		{ value: "streams" as const, label: `📋 lotes de tareas: ${yn(c.detectTaskStreams)}`, description: "trabajo en lote (punched_log / plan_manager / …) no es un bucle" },
-		{ value: "streamMin" as const, label: `📋 llamadas mínimas: ${c.taskStreamMinCalls}`, description: "llamadas de la misma herramienta antes de reconocer un lote" },
-		{ value: "streamTwin" as const, label: `📋 gemelos: ${(c.taskStreamTwinThreshold * 100).toFixed(0)}%`, description: "llamadas más parecidas que esto = la misma tarea repetida, no un lote" },
-		// ── 🔍 Detectores ───────────────────────────────────────────
-		{ value: "text" as const, label: `📝 texto: ${yn(c.detectTextLoops)}`, description: "detecta mensajes de texto repetidos" },
-		{ value: "tool" as const, label: `🔧 herramientas: ${yn(c.detectToolLoops)}`, description: "detecta llamadas repetidas a herramientas" },
-		{ value: "think" as const, label: `🧠 pensamiento: ${yn(c.detectThinkingLoops)}`, description: "detecta razonamiento interno repetido" },
+		{ value: "streams" as const, label: `📋 task streams: ${yn(c.detectTaskStreams)}`, description: "batch work (punched_log / plan_manager / …) is not a loop" },
+		{ value: "streamMin" as const, label: `📋 stream min calls: ${c.taskStreamMinCalls}`, description: "calls of the same tool before a batch is recognized" },
+		{ value: "streamTwin" as const, label: `📋 twin threshold: ${(c.taskStreamTwinThreshold * 100).toFixed(0)}%`, description: "calls more similar than this = the same task repeated, not a batch" },
+		// ── 🔍 Detectors ────────────────────────────────────────────
+		{ value: "text" as const, label: `📝 text: ${yn(c.detectTextLoops)}`, description: "detect repeated text messages" },
+		{ value: "tool" as const, label: `🔧 tools: ${yn(c.detectToolLoops)}`, description: "detect repeated tool calls" },
+		{ value: "think" as const, label: `🧠 thinking: ${yn(c.detectThinkingLoops)}`, description: "detect repeated internal reasoning" },
 		// ── 🧹 ──────────────────────────────────────────────────────
-		{ value: "reset" as const, label: "🧹 reiniciar estado", description: "borra contadores e historial" },
+		{ value: "reset" as const, label: "🧹 reset state", description: "clear counters and history" },
 	]);
 	if (!picked) return;
 	switch (picked) {
@@ -111,138 +111,138 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 			rt.updateStatus(ctx);
 			break;
 		case "window": {
-			const v = await selectFrom(ctx, "⏳ ventana (mensajes a analizar)", [
+			const v = await selectFrom(ctx, "⏳ window (messages to analyze)", [
 				{ value: 5, label: "5" },
-				{ value: 10, label: "10 (por defecto)" },
+				{ value: 10, label: "🎯 10 (default)" },
 				{ value: 15, label: "15" },
 				{ value: 20, label: "20" },
 			]);
-			if (v !== undefined) { c.detectionWindow = v; saveConfig(c); ctx.ui.notify(`ventana: ${v}`, "info"); }
+			if (v !== undefined) { c.detectionWindow = v; saveConfig(c); ctx.ui.notify(`window: ${v}`, "info"); }
 			break;
 		}
 		case "notify":
 			c.notifyOnDetection = !c.notifyOnDetection; saveConfig(c);
-			ctx.ui.notify(`avisos: ${yn(c.notifyOnDetection)}`, "info"); break;
+			ctx.ui.notify(`notifications: ${yn(c.notifyOnDetection)}`, "info"); break;
 		case "footer":
 			c.interactiveFooter = !c.interactiveFooter; saveConfig(c);
-			ctx.ui.notify(`pie interactivo: ${yn(c.interactiveFooter)}`, "info");
+			ctx.ui.notify(`interactive footer: ${yn(c.interactiveFooter)}`, "info");
 			rt.refreshFooter?.(ctx);
 			rt.updateStatus(ctx);
 			break;
 		case "shortcut": {
-			const v = await selectFrom(ctx, "⌨️ atajo para activar/apagar", [
-				{ value: "esc+a" as const, label: "⌨️ esc+a (por defecto)", description: "pulsa ESC y luego a" },
-				{ value: "off" as const, label: "🚫 desactivado" },
+			const v = await selectFrom(ctx, "⌨️ toggle shortcut", [
+				{ value: "esc+a" as const, label: "⌨️ esc+a (default)", description: "press ESC then a" },
+				{ value: "off" as const, label: "🚫 off" },
 			]);
-			if (v !== undefined) { c.toggleShortcut = v; saveConfig(c); rt.refreshFooter?.(ctx); ctx.ui.notify(`atajo: ${v}`, "info"); }
+			if (v !== undefined) { c.toggleShortcut = v; saveConfig(c); rt.refreshFooter?.(ctx); ctx.ui.notify(`shortcut: ${v}`, "info"); }
 			break;
 		}
 		case "warn": {
-			const v = await selectFrom(ctx, "⚠️ umbral de aviso", [
-				{ value: 1, label: "⚡ 1 (sensible)" },
-				{ value: 2, label: "🎯 2 (por defecto)" },
+			const v = await selectFrom(ctx, "⚠️ warn threshold", [
+				{ value: 1, label: "⚡ 1 (sensitive)" },
+				{ value: 2, label: "🎯 2 (default)" },
 				{ value: 3, label: "3" },
-				{ value: 5, label: "🐢 5 (relajado)" },
+				{ value: 5, label: "🐢 5 (relaxed)" },
 			]);
-			if (v !== undefined) { c.warningThreshold = v; saveConfig(c); ctx.ui.notify(`aviso: ${v}`, "info"); }
+			if (v !== undefined) { c.warningThreshold = v; saveConfig(c); ctx.ui.notify(`warn: ${v}`, "info"); }
 			break;
 		}
 		case "force": {
-			const v = await selectFrom(ctx, "🛑 umbral de corte", [
-				{ value: 2, label: "⚡ 2 (sensible)" },
-				{ value: 3, label: "🎯 3 (por defecto)" },
+			const v = await selectFrom(ctx, "🛑 force break threshold", [
+				{ value: 2, label: "⚡ 2 (sensitive)" },
+				{ value: 3, label: "🎯 3 (default)" },
 				{ value: 5, label: "5" },
-				{ value: 8, label: "🐢 8 (relajado)" },
+				{ value: 8, label: "🐢 8 (relaxed)" },
 			]);
-			if (v !== undefined) { c.forceBreakThreshold = v; saveConfig(c); ctx.ui.notify(`corte: ${v}`, "info"); }
+			if (v !== undefined) { c.forceBreakThreshold = v; saveConfig(c); ctx.ui.notify(`force break: ${v}`, "info"); }
 			break;
 		}
 		case "abort": {
-			const v = await selectFrom(ctx, "🚨 umbral de aborto (0 = desactivado)", [
-				{ value: 0, label: "🚫 desactivado" },
+			const v = await selectFrom(ctx, "🚨 abort threshold (0 = disabled)", [
+				{ value: 0, label: "🚫 off" },
 				{ value: 5, label: "5" },
 				{ value: 8, label: "8" },
 				{ value: 10, label: "10" },
 				{ value: 15, label: "15" },
 			]);
-			if (v !== undefined) { c.abortThreshold = v; saveConfig(c); ctx.ui.notify(`aborto: ${v || "desactivado"}`, "info"); }
+			if (v !== undefined) { c.abortThreshold = v; saveConfig(c); ctx.ui.notify(`abort: ${v || "off"}`, "info"); }
 			break;
 		}
 		case "sim": {
-			const v = await selectFrom(ctx, "📏 parecido mínimo entre mensajes", [
-				{ value: 0.5, label: "⚡ 50% (sensible)" },
+			const v = await selectFrom(ctx, "📏 text similarity", [
+				{ value: 0.5, label: "⚡ 50% (sensitive)" },
 				{ value: 0.6, label: "60%" },
 				{ value: 0.7, label: "70%" },
-				{ value: 0.75, label: "🎯 75% (por defecto)" },
+				{ value: 0.75, label: "🎯 75% (default)" },
 				{ value: 0.8, label: "80%" },
-				{ value: 0.9, label: "🐢 90% (relajado)" },
+				{ value: 0.9, label: "🐢 90% (relaxed)" },
 			]);
-			if (v !== undefined) { c.similarityThreshold = v; saveConfig(c); ctx.ui.notify(`parecido: ${(v * 100).toFixed(0)}%`, "info"); }
+			if (v !== undefined) { c.similarityThreshold = v; saveConfig(c); ctx.ui.notify(`similarity: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
 		case "toolSim": {
-			const v = await selectFrom(ctx, "🔧 parecido de las llamadas (argumentos)", [
-				{ value: 0.99, label: "⚡ 99% (estricto)" },
-				{ value: 0.95, label: "🎯 95% (por defecto)" },
+			const v = await selectFrom(ctx, "🔧 call similarity (arguments)", [
+				{ value: 0.99, label: "⚡ 99% (strict)" },
+				{ value: 0.95, label: "🎯 95% (default)" },
 				{ value: 0.9, label: "90%" },
-				{ value: 0.8, label: "🐢 80% (sensible)" },
+				{ value: 0.8, label: "🐢 80% (sensitive)" },
 			]);
-			if (v !== undefined) { c.toolSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`parecido de llamadas: ${(v * 100).toFixed(0)}%`, "info"); }
+			if (v !== undefined) { c.toolSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`call similarity: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
 		case "toolRepeat": {
-			const v = await selectFrom(ctx, "🔁 repeticiones de la misma llamada", [
-				{ value: 1, label: "⚡ 1 (sensible)" },
-				{ value: 2, label: "🎯 2 (por defecto)" },
-				{ value: 3, label: "🐢 3 (relajado)" },
+			const v = await selectFrom(ctx, "🔁 call repeats", [
+				{ value: 1, label: "⚡ 1 (sensitive)" },
+				{ value: 2, label: "🎯 2 (default)" },
+				{ value: 3, label: "🐢 3 (relaxed)" },
 			]);
-			if (v !== undefined) { c.minToolRepeatCount = v; saveConfig(c); ctx.ui.notify(`repeticiones: ${v}+`, "info"); }
+			if (v !== undefined) { c.minToolRepeatCount = v; saveConfig(c); ctx.ui.notify(`call repeats: ${v}+`, "info"); }
 			break;
 		}
 		case "resultSim": {
-			const v = await selectFrom(ctx, "🧾 parecido de resultados (veto de progreso)", [
-				{ value: 0.95, label: "⚡ 95% (estricto — solo resultados casi idénticos cuentan como igual)" },
-				{ value: 0.8, label: "🎯 80% (por defecto)" },
-				{ value: 0.6, label: "🐢 60% (relajado — tolera más ruido de salida)" },
+			const v = await selectFrom(ctx, "🧾 result similarity (progress veto)", [
+				{ value: 0.95, label: "⚡ 95% (strict — only near-identical results count as the same)" },
+				{ value: 0.8, label: "🎯 80% (default)" },
+				{ value: 0.6, label: "🐢 60% (relaxed — tolerates more output noise)" },
 			]);
-			if (v !== undefined) { c.resultSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`parecido de resultados: ${(v * 100).toFixed(0)}%`, "info"); }
+			if (v !== undefined) { c.resultSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`result similarity: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
 		case "streams":
 			c.detectTaskStreams = !c.detectTaskStreams; saveConfig(c);
-			ctx.ui.notify(`lotes de tareas: ${yn(c.detectTaskStreams)}`, "info"); break;
+			ctx.ui.notify(`task streams: ${yn(c.detectTaskStreams)}`, "info"); break;
 		case "streamMin": {
-			const v = await selectFrom(ctx, "📋 llamadas mínimas para reconocer un lote", [
-				{ value: 2, label: "⚡ 2 (sensible)" },
-				{ value: 3, label: "🎯 3 (por defecto)" },
+			const v = await selectFrom(ctx, "📋 stream min calls", [
+				{ value: 2, label: "⚡ 2 (sensitive)" },
+				{ value: 3, label: "🎯 3 (default)" },
 				{ value: 4, label: "4" },
-				{ value: 5, label: "🐢 5 (conservador)" },
+				{ value: 5, label: "🐢 5 (conservative)" },
 			]);
-			if (v !== undefined) { c.taskStreamMinCalls = v; saveConfig(c); ctx.ui.notify(`llamadas mínimas: ${v}`, "info"); }
+			if (v !== undefined) { c.taskStreamMinCalls = v; saveConfig(c); ctx.ui.notify(`stream min calls: ${v}`, "info"); }
 			break;
 		}
 		case "streamTwin": {
-			const v = await selectFrom(ctx, "📋 umbral de gemelos (argumentos)", [
-				{ value: 0.99, label: "🎯 99% (por defecto — cualquier diferencia real = tarea distinta)" },
-				{ value: 0.95, label: "95% (argumentos casi idénticos cuentan como la misma tarea)" },
-				{ value: 0.9, label: "⚡ 90% (detección de bucles más agresiva)" },
+			const v = await selectFrom(ctx, "📋 twin threshold (arguments)", [
+				{ value: 0.99, label: "🎯 99% (default — any real difference = distinct task)" },
+				{ value: 0.95, label: "95% (near-identical arguments count as the same task)" },
+				{ value: 0.9, label: "⚡ 90% (more aggressive loop detection)" },
 			]);
-			if (v !== undefined) { c.taskStreamTwinThreshold = v; saveConfig(c); ctx.ui.notify(`gemelos: ${(v * 100).toFixed(0)}%`, "info"); }
+			if (v !== undefined) { c.taskStreamTwinThreshold = v; saveConfig(c); ctx.ui.notify(`twin threshold: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
 		case "text":
 			c.detectTextLoops = !c.detectTextLoops; saveConfig(c);
-			ctx.ui.notify(`texto: ${yn(c.detectTextLoops)}`, "info"); break;
+			ctx.ui.notify(`text: ${yn(c.detectTextLoops)}`, "info"); break;
 		case "tool":
 			c.detectToolLoops = !c.detectToolLoops; saveConfig(c);
-			ctx.ui.notify(`herramientas: ${yn(c.detectToolLoops)}`, "info"); break;
+			ctx.ui.notify(`tools: ${yn(c.detectToolLoops)}`, "info"); break;
 		case "think":
 			c.detectThinkingLoops = !c.detectThinkingLoops; saveConfig(c);
-			ctx.ui.notify(`pensamiento: ${yn(c.detectThinkingLoops)}`, "info"); break;
+			ctx.ui.notify(`thinking: ${yn(c.detectThinkingLoops)}`, "info"); break;
 		case "reset":
 			resetState(rt.state);
 			rt.pendingIntervention = null;
-			ctx.ui.notify("🧹 estado reiniciado", "info");
+			ctx.ui.notify("🧹 state reset", "info");
 			rt.updateStatus(ctx);
 			break;
 	}
@@ -250,7 +250,7 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 
 async function showLog(ctx: ExtensionCommandContext, rt: Runtime): Promise<void> {
 	if (!rt.state.detections.length) {
-		ctx.ui.notify("no hay detecciones en esta sesión", "info");
+		ctx.ui.notify("no detections this session", "info");
 		return;
 	}
 	const items = rt.state.detections.slice(-30).reverse().map((d) => ({
@@ -258,7 +258,7 @@ async function showLog(ctx: ExtensionCommandContext, rt: Runtime): Promise<void>
 		label: `[${d.type}] ${d.description}`,
 		description: `${(d.similarity * 100).toFixed(0)}% · ${formatDuration(Date.now() - d.timestamp)} ago`,
 	}));
-	await selectFrom(ctx, `🕵️ detecciones (${rt.state.detections.length} en total)`, items);
+	await selectFrom(ctx, `🕵️ detections (${rt.state.detections.length} total)`, items);
 }
 
 export function resetState(state: AntiloopState): void {
