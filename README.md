@@ -106,23 +106,35 @@ Recent detections:
 
 ### `/antiloop config`
 
-Interactive menu with current values:
+Menú interactivo agrupado, con el valor actual en cada opción:
 
-- **Enable/disable**
-- **Warning threshold** — similar messages before warning (default 2)
-- **Force break threshold** — similar messages before force break (default 3)
-- **Abort threshold** — similar messages before abort (0 = disabled)
-- **Similarity threshold** — `0.5 / 0.6 / 0.7 / 0.75 / 0.8 / 0.9` — how close two messages must be to count as looping
-- **Tool similarity** — `0.99 / 0.95 / 0.9 / 0.8` — how close tool-call *arguments* must be to count as the same call (95% default: only near-identical repeats loop)
-- **Tool repeat** — `1 / 2 / 3` — prior occurrences of the same call set required before a tool loop flags
-- **Result similarity** — `0.95 / 0.8 / 0.6` — how similar captured results must be to count as the *same outcome* (veto when a repeated command starts succeeding/differing)
-- **Task streams** — on/off — recognize homogeneous batch work (same extension tool, distinct content) as N tasks of one type, not a loop
-- **Stream min calls** — `2 / 3 / 4 / 5` — same-tool calls required inside the window before batch recognition kicks in (default 3)
-- **Stream twin threshold** — `99% / 95% / 90%` — arguments this similar count as the *same task*; a twin invalidates the stream and re-enables normal detection (default 99%)
-- **Detection window** — `5 / 10 / 15 / 20` — number of recent messages to analyze
-- **Per-strategy toggles** — text / tool / thinking detection
-- **Notifications** — show detection notifications
-- **Reset state** — clear all counters and history
+**🎛️ General**
+- **🟢/🔴 activar/desactivar** — enciende o apaga la detección
+- **⏳ ventana** — `5 / 10 / 15 / 20` — cuántos mensajes recientes se analizan (por defecto 10)
+- **🔔 avisos** — on/off — avisa cuando detecta un bucle
+- **📊 pie interactivo** — on/off — experimental: reemplaza el pie de pantalla de pi y captura el teclado para el atajo (si da problemas de rendimiento, déjalo en off)
+- **⌨️ atajo** — `esc+a` o desactivado — pulsación para activar/apagar sin teclear nada
+
+**🎯 Detección**
+- **⚠️ umbral de aviso** — `1 / 2 / 3 / 5` — repeticiones antes de avisar (por defecto 2)
+- **🛑 umbral de corte** — `2 / 3 / 5 / 8` — repeticiones antes de forzar un cambio de rumbo (por defecto 3)
+- **🚨 umbral de aborto** — `desactivado / 5 / 8 / 10 / 15` — repeticiones antes de abortar (0 = desactivado)
+- **📏 parecido mínimo** — `50 / 60 / 70 / 75 / 80 / 90%` — qué tan parecidos deben ser dos mensajes para contar como bucle (por defecto 75%)
+- **🔧 parecido de llamadas** — `99 / 95 / 90 / 80%` — qué tan idénticas deben ser las llamadas para contar como la misma (por defecto 95%: solo repeticiones casi idénticas son bucle)
+- **🔁 repeticiones de llamada** — `1 / 2 / 3` — cuántas veces se repite la misma llamada antes de marcarla (por defecto 2)
+- **🧾 parecido de resultados** — `95 / 80 / 60%` — qué tan parecidos deben ser los resultados para contar como el *mismo resultado*; si un comando repetido empieza a dar otro resultado, es progreso y no bucle (por defecto 80%)
+
+**📋 Lotes de tareas** — el trabajo en lote (punched_log, plan_manager, …) es N tareas de un tipo, no un bucle
+- **📋 lotes de tareas** — on/off — reconoce ese trabajo en lote y se queda en silencio
+- **📋 llamadas mínimas** — `2 / 3 / 4 / 5` — llamadas de la misma herramienta antes de reconocer un lote (por defecto 3)
+- **📋 gemelos** — `99 / 95 / 90%` — llamadas más parecidas que esto cuentan como la *misma tarea* repetida; un gemelo invalida el lote y vuelve a la detección normal (por defecto 99%)
+
+**🔍 Detectores**
+- **📝 texto** — on/off — detecta mensajes de texto repetidos
+- **🔧 herramientas** — on/off — detecta llamadas a herramientas repetidas
+- **🧠 pensamiento** — on/off — detecta bloques de razonamiento repetidos
+
+**🧹 reiniciar estado** — borra contadores e historial
 
 ### `/antiloop log`
 

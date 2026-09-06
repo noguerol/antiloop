@@ -59,11 +59,19 @@ function similarity(a: string, b: string): number {
  * Stable against PID / timestamp noise at the tail of command output.
  */
 export function resultFingerprint(
-	parts: Array<{ type: string; text?: string }>,
+	parts: unknown,
 	isError: boolean,
 ): string | undefined {
 	let text = "";
-	for (const p of parts) if (p.type === "text" && typeof p.text === "string") text += p.text;
+	if (typeof parts === "string") {
+		text = parts;
+	} else if (Array.isArray(parts)) {
+		for (const p of parts) {
+			if (p && typeof p === "object" && "type" in p && p.type === "text" && typeof (p as any).text === "string") {
+				text += (p as any).text;
+			}
+		}
+	}
 	const norm = normalizeText(text);
 	if (!norm.length) return undefined;
 	return `${isError ? "err" : "ok"}|${norm.slice(-400)}`;
@@ -72,9 +80,6 @@ export function resultFingerprint(
 /** Same outcome = identical fingerprint, or high similarity of the tails. */
 function sameOutcome(a: string, b: string, threshold: number): boolean {
 	if (a === b) return true;
-	// Fingerprints are already normalized + capped, so short ones can be
-	// compared with edit distance directly — similarity() bails under 50 chars
-	// and would wrongly veto small outputs with harmless noise (PIDs, times).
 	if (a.length < 100 && b.length < 100) {
 		const max = Math.max(a.length, b.length);
 		const s = max ? 1 - levenshtein(a, b) / max : 1;
@@ -91,14 +96,10 @@ function toolCallsSimilar(
 	resultThreshold: number,
 ): boolean {
 	if (c1.length !== c2.length) return false;
-	// Empty call lists carry no repetition evidence — never treat them as a match.
 	if (!c1.length) return false;
 	for (let i = 0; i < c1.length; i++) {
 		if (c1[i].name !== c2[i].name) return false;
-		if (similarity(c1[i].args, c2[i].args) < threshold) return false;
-		// Result veto: the same command producing a different outcome is
-		// progress (a retry that fixed the problem), not a loop. Only applies
-		// when both runs actually captured a result.
+		if (!argsTwin(c1[i].args, c2[i].args, threshold)) return false;
 		const r1 = c1[i].result;
 		const r2 = c2[i].result;
 		if (r1 && r2 && !sameOutcome(r1, r2, resultThreshold)) {
@@ -220,7 +221,7 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 				const last = opens[opens.length - 1].o;
 				let n = 0;
 				for (let i = 0; i < opens.length - 1; i++) {
-					if (similarity(last, opens[i].o) > 0.9) n++;
+					if (argsTwin(last, opens[i].o, 0.9)) n++;
 				}
 				if (n >= 2 && !allBatch([msgs.length - 1])) {
 					out.push({
