@@ -8,6 +8,15 @@ export interface AntiloopConfig {
 	abortThreshold: number;
 	similarityThreshold: number;
 	/**
+	 * How many ESSENTIALLY IDENTICAL repeats (≥98% similar text / identical tool
+	 * loops) the model may produce AFTER the force-break message before antiloop
+	 * hard-stops the run (ctx.abort). Guards the force break: if the model ignores
+	 * the break instruction and keeps repeating verbatim, the run is cut instead of
+	 * burning context forever. Only verbatim repeats count — a model that changes
+	 * its output (even while still similar) gets room to escape on its own.
+	 */
+	ignoredSteerLimit: number;
+	/**
 	 * How close tool-call arguments must be (0..1) to count as the SAME call.
 	 * High by default: long bash commands share scaffolding (env setup, flags,
 	 * paths) even when they are different operations — a parameter sweep or a
@@ -107,12 +116,18 @@ export interface AntiloopState {
 	lastUserMessageTime: number;
 	/** turnIndex of the last tracked message detection already ran on. */
 	lastDetectedTurnIndex: number;
+	/** True once the force-break user message was steered into the current episode.
+	 * One steer per episode: repeated steering would spam the conversation. Cleared
+	 * when the episode decays (currentLevel back to 0) or on real user input. */
+	steerDelivered: boolean;
+	/** Verbatim repeats counted AFTER the steer. When this reaches
+	 * config.ignoredSteerLimit the run is hard-stopped (aborted). */
+	ignoredSteerCount: number;
 }
 
 export interface Runtime {
 	config: AntiloopConfig;
 	state: AntiloopState;
-	pendingIntervention: string | null;
 	updateStatus(ctx: ExtensionContext): void;
 	/** Re-install the interactive footer (after config changes). */
 	refreshFooter?(ctx: ExtensionContext): void;

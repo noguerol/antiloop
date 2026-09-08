@@ -32,7 +32,6 @@ export async function handleCommand(
 			return showLog(ctx, rt);
 		case "reset":
 			resetState(rt.state);
-			rt.pendingIntervention = null;
 			ctx.ui.notify("antiloop: reset", "info");
 			rt.updateStatus(ctx);
 			return;
@@ -52,10 +51,10 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 	const recent = rt.state.detections.slice(-5);
 	const lines = [
 		`state: ${rt.config.enabled ? "ON" : "OFF"} · level: ${lvl} · consecutive: ${rt.state.consecutiveDetections}`,
-		`total: ${rt.state.totalDetections} · tracked: ${rt.state.recentMessages.length} · forced: ${rt.state.inForcedBreak ? "yes" : "no"}`,
+		`total: ${rt.state.totalDetections} · tracked: ${rt.state.recentMessages.length} · forced: ${rt.state.inForcedBreak ? "yes" : "no"} · steer: ${rt.state.steerDelivered ? `sent (${rt.state.ignoredSteerCount} ignored)` : "armed"}`,
 		"",
 		"thresholds:",
-		`  warn: ${rt.config.warningThreshold}  force: ${rt.config.forceBreakThreshold}  abort: ${rt.config.abortThreshold || "off"}`,
+		`  warn: ${rt.config.warningThreshold}  force: ${rt.config.forceBreakThreshold}  abort: ${rt.config.abortThreshold || "off"}  stop-after-ignored-break: ${rt.config.ignoredSteerLimit}`,
 		`  similarity: ${(rt.config.similarityThreshold * 100).toFixed(0)}%  window: ${rt.config.detectionWindow}`,
 		`  tool sim: ${(rt.config.toolSimilarityThreshold * 100).toFixed(0)}%  tool repeat: ${rt.config.minToolRepeatCount}+ prior`,
 		`  result sim: ${(rt.config.resultSimilarityThreshold * 100).toFixed(0)}%  (same cmd + diff outcome = no loop)`,
@@ -87,6 +86,7 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "warn" as const, label: `⚠️ warn after: ${c.warningThreshold}`, description: "repetitions before antiloop warns you" },
 		{ value: "force" as const, label: `🛑 force break after: ${c.forceBreakThreshold}`, description: "repetitions before forcing a change of approach" },
 		{ value: "abort" as const, label: `🚨 abort after: ${c.abortThreshold || "off"}`, description: "repetitions before aborting (0 = disabled)" },
+		{ value: "ignoredBreak" as const, label: `🛑 stop after ignored break: ${c.ignoredSteerLimit}`, description: "identical repeats allowed after the force break before antiloop stops the run" },
 		{ value: "sim" as const, label: `📏 text similarity: ${(c.similarityThreshold * 100).toFixed(0)}%`, description: "how similar two messages must be to count as a loop" },
 		{ value: "toolSim" as const, label: `🔧 call similarity: ${(c.toolSimilarityThreshold * 100).toFixed(0)}%`, description: "how identical tool calls must be to count as the same call" },
 		{ value: "toolRepeat" as const, label: `🔁 call repeats: ${c.minToolRepeatCount}+`, description: "how many times the same call must repeat before it flags" },
@@ -230,6 +230,15 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 			if (v !== undefined) { c.taskStreamTwinThreshold = v; saveConfig(c); ctx.ui.notify(`twin threshold: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
+		case "ignoredBreak": {
+			const v = await selectFrom(ctx, "🛑 stop after ignored break (identical repeats after the force break)", [
+				{ value: 1, label: "⚡ 1 (sensitive — one identical repeat after the break stops the run)" },
+				{ value: 2, label: "🎯 2 (default)" },
+				{ value: 3, label: "🐢 3 (lenient)" },
+			]);
+			if (v !== undefined) { c.ignoredSteerLimit = v; saveConfig(c); ctx.ui.notify(`stop after ignored break: ${v}`, "info"); }
+			break;
+		}
 		case "text":
 			c.detectTextLoops = !c.detectTextLoops; saveConfig(c);
 			ctx.ui.notify(`text: ${yn(c.detectTextLoops)}`, "info"); break;
@@ -241,7 +250,6 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 			ctx.ui.notify(`thinking: ${yn(c.detectThinkingLoops)}`, "info"); break;
 		case "reset":
 			resetState(rt.state);
-			rt.pendingIntervention = null;
 			ctx.ui.notify("🧹 state reset", "info");
 			rt.updateStatus(ctx);
 			break;
@@ -270,6 +278,8 @@ export function resetState(state: AntiloopState): void {
 	state.inForcedBreak = false;
 	state.totalDetections = 0;
 	state.lastDetectedTurnIndex = -1;
+	state.steerDelivered = false;
+	state.ignoredSteerCount = 0;
 }
 
 async function runSelfTest(ctx: ExtensionCommandContext): Promise<void> {

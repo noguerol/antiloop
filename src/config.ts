@@ -12,6 +12,7 @@ export const DEFAULT_CONFIG: AntiloopConfig = {
 	warningThreshold: 2,
 	forceBreakThreshold: 3,
 	abortThreshold: 0,
+	ignoredSteerLimit: 2,
 	similarityThreshold: 0.75,
 	toolSimilarityThreshold: 0.95,
 	minToolRepeatCount: 2,
