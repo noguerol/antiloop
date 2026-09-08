@@ -163,6 +163,14 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 					? undefined
 					: ctx.ui.onTerminalInput?.((data: string) => {
 							if (config.toggleShortcut === "off") return undefined;
+							// Only honor the toggle while idle. ESC is also pi's interrupt key:
+							// an 'a' typed right after cancelling a stuck run is almost always
+							// normal typing, not a toggle — arming while the agent runs caused
+							// accidental silent toggles to OFF mid-session.
+							if (!ctx.isIdle()) {
+								pendingEsc = false;
+								return undefined;
+							}
 							if (data === "\x1b") {
 								pendingEsc = true;
 								return undefined;

@@ -17,7 +17,7 @@
 - **Progressive intervention** — `warning` reminds the model to vary its approach; `force break` injects explicit anti-loop instructions and modifies context; `abort` stops the run entirely
 - **Configurable thresholds** — independent dials for similarity cutoff, warning/force-break/abort counts, detection window, and which strategies are on
 - **Sliding window** — only the last N messages are compared, so detection is O(N) in the window size, not in the full session
-- **Live footer indicator** — `🔄 antiloop(on|off)` in the footer, per spec, with the current level (`⚠️/🛑/🚨`) and consecutive count; an interactive TUI footer adds a keyboard toggle (`esc+a` by default, configurable/off) and preserves the built-in footer's pwd/branch/context/model info
+- **Live footer indicator** — `🔄 antiloop(on|off)` in the footer, per spec, with the current level (`⚠️/🛑/🚨`) and consecutive count; an interactive TUI footer adds a keyboard toggle (`esc+a` by default, configurable/off, honored only while idle) and preserves the built-in footer's pwd/branch/context/model info
 - **Detection log** — timestamped history with similarity scores, filterable through the native pi menu
 - **Self-test** — `/antiloop test` runs built-in cases to verify the similarity engine is calibrated
 - **User input softens detection** — each new user message decays the consecutive counter so a fresh prompt can resolve the loop without manual reset
@@ -316,7 +316,7 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 | `maxHistoryEntries` | `100` | Max detection history entries |
 | `detectionWindow` | `10` | Number of recent messages to analyze |
 | `interactiveFooter` | `true` | TUI footer replaces the built-in one with an antiloop indicator + toggle shortcut (set `false` to keep the built-in footer and only the `setStatus` line) |
-| `toggleShortcut` | `esc+a` | Key sequence that toggles antiloop from the footer (`esc+a` or `off`). The input is never consumed, so typing is unaffected |
+| `toggleShortcut` | `esc+a` | Key sequence that toggles antiloop from the footer (`esc+a` or `off`). Honored only while pi is idle (ESC is also pi's interrupt key — typing `a` right after cancelling a stuck run must not silently switch antiloop off). The input is never consumed, so typing is unaffected |
 
 ## Best Practices
 
