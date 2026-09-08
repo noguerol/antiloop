@@ -61,7 +61,7 @@ pi remove npm:pi-antiloop
 /antiloop config     # adjust thresholds to taste
 ```
 
-That's it. Antiloop is on by default. If the model ever starts repeating itself, you'll see a `⚠️ antiloop(N)` warning; if it keeps looping past the force-break threshold, antiloop injects an "abort this pattern now" instruction into the context.
+That's it. Antiloop is on by default. If the model ever starts repeating itself, you'll see a `⚠️` warning; if it keeps looping past the force-break threshold, antiloop steers a break message into the *running* agent before its next tool call — and if the model ignores it and keeps repeating verbatim, antiloop aborts the run. Loops always terminate.
 
 ## Commands
 
@@ -353,7 +353,8 @@ Modular extension with zero external dependencies (only pi's bundled `@earendil-
 - **Sliding window** — only the last `detectionWindow` messages participate, capping memory at O(W × message_size)
 - **Early bail** — short messages and empty tool calls skip similarity computation entirely
 - **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` + a custom `ctx.ui.setFooter` component for the persistent footer indicator, live level info, and the `esc+a` keyboard toggle (`ctx.ui.onTerminalInput`, never consumes input)
-- **Hooks** — `message_end` (track messages + tool call ids), `turn_end` (attach result fingerprints + detect), `input` (decay), `before_agent_start` (inject intervention — force/abort only), `context` (modify context in force-break mode), `session_start` (load config + install footer + reset), `session_shutdown` (restore built-in footer)
+- **Hooks** — `message_end` (track messages + tool call ids), `turn_end` (attach result fingerprints, detect, and intervene: steer the force break / abort the run), `input` (decay on real user messages only), `session_start` (load config + install footer + reset), `session_shutdown` (restore built-in footer)
+- **Intervention runs on the turn loop, not on user prompts** — escalation is decided at `turn_end`, the break is steered into the running agent before its next LLM call, and the guaranteed hard stop aborts the run (`ctx.abort`, fire-and-forget — never awaited, so the hook can't deadlock). No custom-role messages are injected into the conversation at any level (steering a real user message + aborting are the only levers; custom-role injections were removed because a model can stall on an unexpected injected message)
 
 ## License
 

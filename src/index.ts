@@ -1,7 +1,20 @@
 /**
  * antiloop — detect reasoning loops and intervene.
- * Hooks: message_end, input, before_agent_start, context, turn_end, session_start, session_shutdown.
+ * Hooks: message_end, input, turn_end, session_start, session_shutdown.
  * Commands: /antiloop [enable|disable|status|config|log|reset|test]
+ *
+ * Intervention model (v1.5):
+ *   warning (level 1) — informational only (notify). Never injects: an injected
+ *     message at warning level made models stall on the unexpected message.
+ *   force   (level 2) — a REAL user message is steered into the running agent
+ *     (pi.sendUserMessage, deliverAs "steer"); pi delivers it right after the
+ *     current tool results, immediately before the next LLM call, so it lands at
+ *     the exact spot where the model anchors — even a deterministic model stuck
+ *     on an identical context tail must respond to it. One steer per episode.
+ *     If the model ignores the steer and repeats the same message verbatim
+ *     (≥98% similar / identical tool loop) ignoredSteerLimit times, antiloop
+ *     hard-stops the run (ctx.abort).
+ *   abort   (level 3, opt-in via abortThreshold) — stops the run outright.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -23,6 +36,8 @@ function newState(): AntiloopState {
 		totalDetections: 0,
 		lastUserMessageTime: 0,
 		lastDetectedTurnIndex: -1,
+		steerDelivered: false,
+		ignoredSteerCount: 0,
 	};
 }
 
@@ -54,8 +69,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		activeTui?.requestRender();
 	}
 
-	const rt: Runtime = { config, state, pendingIntervention: null, updateStatus, refreshFooter: installFooter };
-	const setPending = (v: string | null) => { rt.pendingIntervention = v; };
+	const rt: Runtime = { config, state, updateStatus, refreshFooter: installFooter };
 
 	/** Toggle enable/disable, persisting config and refreshing the footer. */
 	function toggleEnabled(ctx: ExtensionContext): void {
@@ -65,38 +79,65 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	}
 
-	function processDetections(
-		detections: LoopDetection[],
-		interventionMessage: (level: 2 | 3, d: LoopDetection[]) => string,
-	): void {
-		if (!detections.length) {
-			if (state.consecutiveDetections > 0) state.consecutiveDetections = Math.max(0, state.consecutiveDetections - 1);
-			if (state.currentLevel > 0 && state.consecutiveDetections === 0) {
-				state.currentLevel = 0;
-				state.inForcedBreak = false;
+	/** Set the escalation level; keeps the derived inForcedBreak flag in sync. */
+	function applyLevel(level: 0 | 1 | 2 | 3): void {
+		state.currentLevel = level;
+		state.inForcedBreak = level >= 2;
+	}
+
+	/** level from the current consecutive count (lazy import wrapper). */
+	async function levelForConsecutive(): Promise<0 | 1 | 2 | 3> {
+		const { nextLevel } = await import("./detect.ts");
+		return nextLevel(state.consecutiveDetections, config);
+	}
+
+	/**
+	 * Force break: steer a real user message into the running agent. pi delivers
+	 * "steer" messages right after the current tool results and BEFORE the next
+	 * LLM call — the model must respond to it, which breaks the identical-context
+	 * anchoring that verbatim loops feed on. (before_agent_start injection was
+	 * abandoned: it only fires on the NEXT user prompt, never mid-run — the exact
+	 * reason antiloop previously failed to cut autonomous tool loops.)
+	 */
+	function deliverForceBreak(ctx: ExtensionContext, detections: LoopDetection[]): void {
+		const detail = detections[0]?.description ?? "repeated message/tool calls";
+		try {
+			pi.sendUserMessage(
+				`[antiloop] 🛑 Force break — loop detected (${detail}; ${state.consecutiveDetections} consecutive).\n` +
+					"Stop repeating previous text, reasoning and tool calls, and change approach now.\n" +
+					"If you cannot make progress with a different approach, do NOT call more tools — " +
+					"reply to the user briefly: what you tried, what is blocking you, and what you need.",
+				{ deliverAs: "steer" },
+			);
+			state.steerDelivered = true;
+			if (config.notifyOnDetection) {
+				ctx.ui.notify(`antiloop: force break — ${detail} (break message sent to the model)`, "error");
 			}
-			return;
+		} catch (err) {
+			// Steer could not be queued (edge: run ended between detection and queue).
+			// Stay armed so the next steerable turn delivers the break.
+			state.steerDelivered = false;
+			if (config.notifyOnDetection) {
+				ctx.ui.notify(
+					`antiloop: force break — ${detail} (could not inject: ${err instanceof Error ? err.message : String(err)})`,
+					"error",
+				);
+			}
 		}
-		state.consecutiveDetections++;
-		state.totalDetections++;
-		state.detections.push(...detections);
-		if (state.detections.length > config.maxHistoryEntries) state.detections = state.detections.slice(-config.maxHistoryEntries);
+	}
 
-		let next: 0 | 1 | 2 | 3 = 0;
-		if (state.consecutiveDetections >= config.abortThreshold && config.abortThreshold > 0) next = 3;
-		else if (state.consecutiveDetections >= config.forceBreakThreshold) next = 2;
-		else if (state.consecutiveDetections >= config.warningThreshold) next = 1;
-		if (next > state.currentLevel) state.currentLevel = next;
-
-		// Warning (level 1) is informational only: notify the user but DO NOT
-		// inject any message into the conversation. Injecting at warning level
-		// made the model respond to the warning, which could stall generation
-		// even though hard-kill turns remained. Only force (2) / abort (3) inject.
-		if (state.currentLevel >= 2) {
-			setPending(interventionMessage(state.currentLevel as 2 | 3, detections));
-			state.inForcedBreak = true;
-		} else if (state.currentLevel === 1) {
-			state.inForcedBreak = false;
+	/**
+	 * Hard stop: abort the current agent run (fire-and-forget — never awaited, so
+	 * the turn_end handler cannot deadlock on waitForIdle) and tell the user.
+	 */
+	function hardStop(ctx: ExtensionContext, text: string): void {
+		try {
+			ctx.abort();
+		} catch {
+			// abort must never throw out of a hook.
+		}
+		if (config.notifyOnDetection) {
+			ctx.ui.notify(text, "error");
 		}
 	}
 
@@ -222,44 +263,29 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("input", async () => {
+	pi.on("input", async (event) => {
 		if (!config.enabled) return;
+		// Messages queued by extensions (including antiloop's own force-break
+		// steer) are NOT user input: they must not cool down the escalation or
+		// re-arm the steer — that would defeat the force break.
+		const source = (event as { source?: string } | undefined)?.source;
+		if (source === "extension") return { action: "continue" };
+
 		state.lastUserMessageTime = Date.now();
-		if (state.consecutiveDetections > 0) state.consecutiveDetections = Math.max(0, state.consecutiveDetections - 2);
-		if (state.consecutiveDetections < config.warningThreshold) {
-			state.currentLevel = 0;
-			state.inForcedBreak = false;
+		if (state.consecutiveDetections > 0) {
+			state.consecutiveDetections = Math.max(0, state.consecutiveDetections - 2);
 		}
+		// A real user message is a new chance: mirror the level off the cooled-down
+		// counter and re-arm the force break so a fresh loop gets a fresh steer.
+		applyLevel(await levelForConsecutive());
+		state.steerDelivered = false;
+		state.ignoredSteerCount = 0;
 		return { action: "continue" };
-	});
-
-	pi.on("before_agent_start", async () => {
-		if (!config.enabled || !rt.pendingIntervention) return;
-		const msg = rt.pendingIntervention;
-		rt.pendingIntervention = null;
-		return {
-			message: { customType: "antiloop-intervention", content: msg, display: true },
-		};
-	});
-
-	pi.on("context", async (event) => {
-		if (!config.enabled || state.currentLevel < 2) return;
-		const msgs = [...event.messages];
-		for (let i = msgs.length - 1; i >= 0; i--) {
-			if (msgs[i].role === "assistant") {
-				const m = msgs[i] as { content: string | Array<{ type: string; text?: string }> };
-				const inject = "\n\n[antiloop] break out of loop — try a different approach.";
-				if (typeof m.content === "string") m.content += inject;
-				else if (Array.isArray(m.content)) m.content.push({ type: "text", text: inject });
-				break;
-			}
-		}
-		return { messages: msgs };
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
 		if (!config.enabled) return;
-		const { detectLoops, detectTaskStreams, interventionMessage, resultFingerprint } = await import("./detect.ts");
+		const { detectLoops, detectTaskStreams, isVerbatimRepeat, nextLevel, resultFingerprint } = await import("./detect.ts");
 
 		const last = state.recentMessages[state.recentMessages.length - 1];
 		if (!last || last.turnIndex === state.lastDetectedTurnIndex) {
@@ -288,12 +314,66 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		).map(([tool, count]) => ({ tool, count }));
 
 		const detections = detectLoops(state, config);
-		processDetections(detections, interventionMessage);
+		const prevLevel = state.currentLevel;
 
-		if (config.notifyOnDetection && detections.length && state.currentLevel > 0) {
-			const lvl = ["", "warning", "force", "abort"][state.currentLevel];
-			ctx.ui.notify(`antiloop: ${lvl} — ${detections[0].description}`, state.currentLevel >= 2 ? "error" : "warning");
+		// ---- clean turn: cool down ----------------------------------------
+		if (!detections.length) {
+			if (state.consecutiveDetections > 0) state.consecutiveDetections--;
+			applyLevel(nextLevel(state.consecutiveDetections, config));
+			if (state.currentLevel === 0) {
+				state.steerDelivered = false;
+				state.ignoredSteerCount = 0;
+			}
+			updateStatus(ctx);
+			return;
 		}
+
+		// ---- detection: escalate ------------------------------------------
+		state.consecutiveDetections++;
+		state.totalDetections++;
+		state.detections.push(...detections);
+		if (state.detections.length > config.maxHistoryEntries) {
+			state.detections = state.detections.slice(-config.maxHistoryEntries);
+		}
+		applyLevel(nextLevel(state.consecutiveDetections, config));
+		const level = state.currentLevel;
+
+		// The steer is only picked up when the run keeps going after this turn.
+		// On error/aborted stop reasons the agent loop returns immediately and the
+		// queued message would go stale — stay armed and steer on a later turn.
+		const stopReason = (event as { message?: { stopReason?: string } } | undefined)?.message?.stopReason;
+		const steerable = stopReason !== "error" && stopReason !== "aborted" && ctx.signal !== undefined;
+
+		if (level === 1 && prevLevel < 1) {
+			// Warning: informational only (never injects — a warning must not stall).
+			if (config.notifyOnDetection) {
+				ctx.ui.notify(`antiloop: warning — ${detections[0].description}`, "warning");
+			}
+		} else if (level === 2) {
+			if (!state.steerDelivered) {
+				// First force-break turn of the episode: steer a break message
+				// before the next LLM call.
+				if (steerable) {
+					deliverForceBreak(ctx, detections);
+				} else if (prevLevel < 2 && config.notifyOnDetection) {
+					ctx.ui.notify(`antiloop: force break — ${detections[0].description}`, "error");
+				}
+			} else if (isVerbatimRepeat(detections)) {
+				// The model repeated the same message/call after being told to stop:
+				// count it; once the ignore limit is hit the run is cut for good.
+				state.ignoredSteerCount++;
+				if (state.ignoredSteerCount >= config.ignoredSteerLimit) {
+					hardStop(
+						ctx,
+						`antiloop: abort — the model repeated the same message ${state.ignoredSteerCount}× after the force break — run stopped; provide new instructions`,
+					);
+				}
+			}
+		} else if (level === 3) {
+			// abortThreshold configured and reached: stop the run outright.
+			hardStop(ctx, `antiloop: abort — ${detections[0].description} — run stopped; provide new instructions`);
+		}
+
 		updateStatus(ctx);
 	});
 
@@ -301,7 +381,6 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		// re-read config and reset state for a fresh session
 		Object.assign(config, loadConfig());
 		state = newState();
-		rt.pendingIntervention = null;
 		installFooter(ctx);
 		updateStatus(ctx);
 	});

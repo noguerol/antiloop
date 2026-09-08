@@ -287,15 +287,23 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 	return out;
 }
 
-export function interventionMessage(level: 1 | 2 | 3, detections: LoopDetection[]): string {
-	const det = detections.map((d) => `- ${d.description}`).join("\n");
-	if (level === 1) {
-		return `[antiloop] ⚠️ loop warning\n${det}\nvary approach — try a different strategy.`;
-	}
-	if (level === 2) {
-		return `[antiloop] 🛑 stuck in loop\n${det}\nstop, change approach, do NOT repeat previous tool calls or reasoning.`;
-	}
-	return `[antiloop] 🚨 persistent loop\n${det}\nunable to break automatically — provide new instructions.`;
+/** Escalation level for a consecutive-detection count (mirror of the configured
+ * ladder). Abort (3) only when abortThreshold is enabled (> 0). */
+export function nextLevel(consecutiveDetections: number, config: AntiloopConfig): 0 | 1 | 2 | 3 {
+	if (config.abortThreshold > 0 && consecutiveDetections >= config.abortThreshold) return 3;
+	if (consecutiveDetections >= config.forceBreakThreshold) return 2;
+	if (consecutiveDetections >= config.warningThreshold) return 1;
+	return 0;
+}
+
+/** True when detections prove the model repeated a message/tool call essentially
+ * verbatim (≥98% text similarity or an identical tool-loop). Weaker signals
+ * (thinking echoes, structural repeated openings at 90%) do NOT count — a model
+ * that only *thinks* in circles but varies its actual output is still making an
+ * attempt and must not be hard-stopped. Used post-force-break: only verbatim
+ * repeats prove the model ignored the break instruction. */
+export function isVerbatimRepeat(detections: LoopDetection[]): boolean {
+	return detections.some((d) => d.type !== "thinking" && d.similarity >= 0.98);
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +377,7 @@ export function runSelfTest(): string[] {
 	const noteArgs = (x: string) =>
 		JSON.stringify({ type: "note", title: `task ${x}`, body: "append this line to the project memory document so context is preserved" });
 	const tcfg: AntiloopConfig = {
-		enabled: true, warningThreshold: 2, forceBreakThreshold: 3, abortThreshold: 0,
+		enabled: true, warningThreshold: 2, forceBreakThreshold: 3, abortThreshold: 0, ignoredSteerLimit: 2,
 		similarityThreshold: 0.75, toolSimilarityThreshold: 0.95, minToolRepeatCount: 2,
 		resultSimilarityThreshold: 0.8, detectToolLoops: true, detectThinkingLoops: true,
 		detectTextLoops: true, notifyOnDetection: true, maxHistoryEntries: 100,
@@ -379,7 +387,8 @@ export function runSelfTest(): string[] {
 	const asState = (recentMessages: TrackedMessage[]): AntiloopState =>
 		({ recentMessages, detections: [], activeTaskStreams: [], currentLevel: 0,
 			consecutiveDetections: 0, inForcedBreak: false, totalDetections: 0,
-			lastUserMessageTime: 0, lastDetectedTurnIndex: -1 });
+			lastUserMessageTime: 0, lastDetectedTurnIndex: -1,
+			steerDelivered: false, ignoredSteerCount: 0 });
 	const NARR = "Now I will append the next decision entry to the project memory document so we keep the context.";
 
 	// 1) punched_log batch: 3 DIFFERENT appends (args 98.9% similar, NOT twins)
@@ -420,6 +429,19 @@ export function runSelfTest(): string[] {
 	const twoMsgs = [mk("a", [{ name: "punched_log", args: noteArgs("1") }]), mk("b", [{ name: "punched_log", args: noteArgs("2") }])];
 	const twoStreams = detectTaskStreams(twoMsgs, tcfg);
 	out.push(`stream needs ≥3 calls   → ${twoStreams.size === 0 ? "no stream" : "stream"} (exp no stream at 2 calls) ${twoStreams.size === 0 ? "✅" : "❌"}`);
+
+	// --- v1.5: escalation ladder + post-steer verbatim-repeat gating ---
+	const lvl = (n: number) => nextLevel(n, tcfg);
+	out.push(`ladder 0→0 1→0 2→1 3→2 4→2  → ${[0, 1, 2, 3, 4].map(lvl).join(",")} (exp 0,0,1,2,2) ${[0, 1, 2, 3, 4].map(lvl).join(",") === "0,0,1,2,2" ? "✅" : "❌"}`);
+	const abortCfg: AntiloopConfig = { ...tcfg, abortThreshold: 5 };
+	out.push(`ladder abort@5 → 5→3       → ${nextLevel(5, abortCfg)} (exp 3) ${nextLevel(5, abortCfg) === 3 ? "✅" : "❌"}`);
+	const dl = (type: LoopDetection["type"], sim: number): LoopDetection[] =>
+		[{ type, similarity: sim, messageIndices: [0, 1], description: `${type} ${sim}`, timestamp: Date.now() }];
+	out.push(`verbatim text 1.00        → ${isVerbatimRepeat(dl("text", 1)) ? "yes" : "no"} (exp yes) ${isVerbatimRepeat(dl("text", 1)) ? "✅" : "❌"}`);
+	out.push(`verbatim text 0.97        → ${isVerbatimRepeat(dl("text", 0.97)) ? "yes" : "no"} (exp no — changed output = attempt) ${!isVerbatimRepeat(dl("text", 0.97)) ? "✅" : "❌"}`);
+	out.push(`verbatim tool-loop        → ${isVerbatimRepeat(dl("tool", 1)) ? "yes" : "no"} (exp yes) ${isVerbatimRepeat(dl("tool", 1)) ? "✅" : "❌"}`);
+	out.push(`thinking-only 1.00        → ${isVerbatimRepeat(dl("thinking", 1)) ? "yes" : "no"} (exp no — output varies) ${!isVerbatimRepeat(dl("thinking", 1)) ? "✅" : "❌"}`);
+	out.push(`structural 0.90           → ${isVerbatimRepeat(dl("structural", 0.9)) ? "yes" : "no"} (exp no) ${!isVerbatimRepeat(dl("structural", 0.9)) ? "✅" : "❌"}`);
 
 	return out;
 }
