@@ -34,6 +34,163 @@ function opening(text: string, n = 10): string {
 	return normalizeText(text.split(/\s+/).slice(0, n).join(" "));
 }
 
+// ---------------------------------------------------------------------------
+// Intra-message degenerate repetition (v1.6).
+//
+// The "lorem ×5145" class (verified against a real session — /srv
+// 2026-09-09T15-43: ONE 46 KB bash call whose SSH username list repeats a
+// single word 5145 times, a run of 5140 — 99% of the payload). A model whose
+// decoder anchors on a token stops producing NEW output: it repeats the same
+// word hundreds of times INSIDE one message or tool call. The cross-message
+// detectors (text / tool / thinking / structural) all need >= 2 similar
+// messages and cannot see this — the meltdown happened exactly once, inside a
+// single call, and antiloop stayed silent until the user ESC'd.
+//
+// This detector is self-contained: it flags the FIRST such payload, no peer
+// message required, and it is cheap enough to run at message_end (before the
+// tool calls execute) and on every bash tool_call (blocking gate).
+// ---------------------------------------------------------------------------
+
+/** Longest run / top frequency of ONE repeated word inside a payload. */
+export interface DegenerateInfo {
+	token: string;
+	freq: number;
+	maxRun: number;
+	total: number;
+}
+
+export interface DegenerateHit extends DegenerateInfo {
+	where: string;
+}
+
+/** Ignore 1-letter tokens as candidates (JSON keys like {"a":1} must not flag). */
+const MIN_TOKEN_LEN = 2;
+
+/**
+ * Detect pathological single-word repetition in a payload (assistant text or a
+ * JSON.stringify'd tool-call argument). Returns the repeated word with its
+ * count, longest consecutive run and payload size, or undefined when the
+ * payload is normal.
+ *
+ * Tokenization: runs of unicode letters, lowercased. Stored tool args are
+ * JSON-escaped (real newlines arrived as the two characters `\n`), so escaped
+ * whitespace is normalized back to a separator first — a word list written
+ * across lines must still tokenize word by word. Digits/punctuation/code
+ * symbols split tokens instead of polluting them.
+ *
+ * Signals (both are conclusive for generation quality):
+ *   - a run of >= degenerateMaxRun consecutive identical words, or
+ *   - one word occurring >= degenerateMaxFreq times with >= degenerateMaxShare
+ *     of all tokens (catches interleaved "A B A B" meltdowns with no run).
+ * A payload must have >= degenerateMinTokens tokens to be scanned.
+ */
+export function findDegenerateRepetition(
+	text: string,
+	config: AntiloopConfig,
+): DegenerateInfo | undefined {
+	let s = String(text).replace(/\\+[nrt]/g, " ").toLowerCase();
+	const raw = s.match(/[\p{L}]+/gu);
+	if (!raw) return undefined;
+	const total = raw.length;
+
+	let maxRun = 0;
+	let runToken = "";
+	let prev = "";
+	let run = 0;
+	const freq = new Map<string, number>();
+	for (const t of raw) {
+		if (t.length < MIN_TOKEN_LEN) {
+			run = 0;
+			prev = "";
+			continue;
+		}
+		freq.set(t, (freq.get(t) ?? 0) + 1);
+		if (t === prev) run++;
+		else {
+			run = 1;
+			prev = t;
+		}
+		if (run > maxRun) {
+			maxRun = run;
+			runToken = t;
+		}
+	}
+	let topToken = "";
+	let topFreq = 0;
+	for (const [t, c] of freq) {
+		if (c > topFreq) {
+			topFreq = c;
+			topToken = t;
+		}
+	}
+	if (total >= config.degenerateMinTokens) {
+		if (maxRun >= config.degenerateMaxRun) {
+			return { token: runToken, freq: freq.get(runToken) ?? topFreq, maxRun, total };
+		}
+		if (topFreq >= config.degenerateMaxFreq && topFreq / total >= config.degenerateMaxShare) {
+			return { token: topToken, freq: topFreq, maxRun, total };
+		}
+	}
+
+	// No-space meltdown: one giant periodic token ("loremlorem…" with all
+	// separators stripped) is a perfect power of a short motif. Independent of
+	// the token-count gate: a single 1200+ char token has no word runs at all.
+	if (raw.length <= 2) {
+		const single = raw.join("");
+		const len = single.length;
+		if (len >= 1200) {
+			for (let p = 3; p <= 200 && p * 12 <= len; p++) {
+				if (len % p) continue;
+				const motif = single.slice(0, p);
+				let ok = true;
+				for (let i = p; i < len; i += p) {
+					if (!single.startsWith(motif, i)) {
+						ok = false;
+						break;
+					}
+				}
+				if (ok) {
+					const repeats = len / p;
+					if (repeats >= 12) {
+						return { token: motif.slice(0, 40), freq: repeats, maxRun: repeats, total: repeats };
+					}
+				}
+			}
+		}
+	}
+	return undefined;
+}
+
+/** Scan one assistant message (text + each tool-call argument) for a meltdown. */
+export function scanMessageDegenerate(
+	content: string,
+	toolCalls: TrackedToolCall[] | undefined,
+	config: AntiloopConfig,
+): DegenerateHit | undefined {
+	if (!config.detectDegenerate) return undefined;
+	if (content && content.length) {
+		const d = findDegenerateRepetition(content, config);
+		if (d) return { ...d, where: "message text" };
+	}
+	for (const tc of toolCalls ?? []) {
+		if (!tc.args) continue;
+		const d = findDegenerateRepetition(tc.args, config);
+		if (d) return { ...d, where: tc.name === "bash" ? "bash command" : `args(${tc.name})` };
+	}
+	return undefined;
+}
+
+export function degenerateDescription(hit: DegenerateHit): string {
+	const share = hit.total ? Math.round((hit.freq / hit.total) * 100) : 100;
+	return `${hit.where}: degenerate repetition — "${hit.token}" ×${hit.freq} (${share}% of ${hit.total} tokens, longest run ${hit.maxRun})`;
+}
+
+/** Consecutive-detection weight of a detection turn (degenerate = heavy, so a
+ * single meltdown already reaches the warning level and escalates on repeat). */
+export function detectionTurnWeight(detections: LoopDetection[], config: AntiloopConfig): number {
+	return detections.some((d) => d.type === "degenerate") ? Math.max(1, config.degenerateTurnWeight) : 1;
+}
+
 function similarity(a: string, b: string): number {
 	if (a.length < MIN_CONTENT_LENGTH || b.length < MIN_CONTENT_LENGTH) return 0;
 	if (a === b) return 1;
@@ -177,10 +334,27 @@ export function detectTaskStreams(
 export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopDetection[] {
 	const out: LoopDetection[] = [];
 	const msgs = state.recentMessages;
-	if (msgs.length < 2) return out;
+	if (msgs.length < 1) return out;
 	const start = Math.max(0, msgs.length - config.detectionWindow);
 	const win = msgs.slice(start);
 	const now = Date.now();
+
+	// Intra-message degenerate repetition fires on a SINGLE pathological message
+	// (no peer needed) and is independent of the task-stream batch gate: a
+	// meltdown is a meltdown even mid-batch.
+	if (config.detectDegenerate) {
+		const last = win[win.length - 1];
+		const hit = scanMessageDegenerate(last.content, last.toolCalls, config);
+		if (hit) {
+			out.push({
+				type: "degenerate",
+				similarity: 1,
+				messageIndices: [msgs.length - 1],
+				description: degenerateDescription(hit),
+				timestamp: now,
+			});
+		}
+	}
 
 	// Task-stream gate: if the window is a homogeneous batch (same extension
 	// tool called with DISTINCT content ≥ taskStreamMinCalls times), that tool
@@ -383,6 +557,8 @@ export function runSelfTest(): string[] {
 		detectTextLoops: true, notifyOnDetection: true, maxHistoryEntries: 100,
 		detectionWindow: 10, interactiveFooter: true, toggleShortcut: "esc+a",
 		detectTaskStreams: true, taskStreamMinCalls: 3, taskStreamTwinThreshold: 0.99,
+		detectDegenerate: true, degenerateMinTokens: 50, degenerateMaxRun: 16,
+		degenerateMaxFreq: 60, degenerateMaxShare: 0.4, degenerateTurnWeight: 2, blockDegenerateBash: true,
 	};
 	const asState = (recentMessages: TrackedMessage[]): AntiloopState =>
 		({ recentMessages, detections: [], activeTaskStreams: [], currentLevel: 0,
@@ -442,6 +618,52 @@ export function runSelfTest(): string[] {
 	out.push(`verbatim tool-loop        → ${isVerbatimRepeat(dl("tool", 1)) ? "yes" : "no"} (exp yes) ${isVerbatimRepeat(dl("tool", 1)) ? "✅" : "❌"}`);
 	out.push(`thinking-only 1.00        → ${isVerbatimRepeat(dl("thinking", 1)) ? "yes" : "no"} (exp no — output varies) ${!isVerbatimRepeat(dl("thinking", 1)) ? "✅" : "❌"}`);
 	out.push(`structural 0.90           → ${isVerbatimRepeat(dl("structural", 0.9)) ? "yes" : "no"} (exp no) ${!isVerbatimRepeat(dl("structural", 0.9)) ? "✅" : "❌"}`);
+
+	// --- v1.6: intra-message degenerate repetition (single-message meltdown) ---
+	// Regression: the real session /srv 2026-09-09T15-43 — ONE 46 KB bash call
+	// whose username list repeats "lorem" 5145 times (run of 5140). Every
+	// cross-message detector needs a peer message and stayed silent; the
+	// degenerate scan must fire on the FIRST such message, alone in the window.
+	const argJson = (cmd: string) => JSON.stringify({ command: cmd }); // stored args form
+	const meltdownCmd =
+		`echo "=== brute usernames with host pw ==="; for u in alice alice@ j bob bob@ root carol ${`lorem `.repeat(400)}; do :; done`;
+	const meltMsg = mk("", [{ name: "bash", args: argJson(meltdownCmd) }]);
+	const mDet = detectLoops(asState([meltMsg]), tcfg);
+	const mHit = mDet.find((d) => d.type === "degenerate");
+	out.push(`degenerate first sight   → ${mHit ? `degenerate (${mHit.description})` : "no"} (exp degenerate — was the miss) ${mHit ? "✅" : "❌"}`);
+
+	// Legit payloads must NOT flag: short commands are under minTokens, real
+	// scripts never repeat one word 16× in a row.
+	const leg1 = findDegenerateRepetition(sweepRun1, tcfg);
+	const leg2 = findDegenerateRepetition("for i in 1 2 3; do echo step $i; done", tcfg);
+	const leg3 = findDegenerateRepetition(
+		"set -euo pipefail; mkdir -p build tmp dist logs data assets src test docs lib bin etc usr var opt srv && " +
+			"cp -r config.yaml README.md LICENSE package.json tsconfig.json src lib test docs assets && " +
+			"chmod +x scripts/deploy.sh scripts/backup.sh scripts/monitor.sh && " +
+			"./scripts/deploy.sh --env production --region eu-west-1 --tag v1.2.3 --dry-run false > deploy.log 2>&1 || echo deploy failed",
+		tcfg,
+	);
+	out.push(`degenerate legit cmd      → ${leg1 || leg2 || leg3 ? "flag" : "ok"} (exp ok) ${!leg1 && !leg2 && !leg3 ? "✅" : "❌"}`);
+
+	// Interleaved meltdown ("A B A B…") has no long run — caught via freq/share.
+	const inter = findDegenerateRepetition("lorem ipsum ".repeat(150), tcfg);
+	out.push(`degenerate interleaved    → ${inter ? `flag (${inter.token} ×${inter.freq})` : "no"} (exp flag — freq/share clause) ${inter ? "✅" : "❌"}`);
+
+	// Word list written ACROSS lines: separators are the literal "\n" escapes
+	// inside the stored JSON args — must still tokenize word by word.
+	const acrossLines = argJson("for u in " + "lorem\n".repeat(120) + "done");
+	const linesHit = findDegenerateRepetition(acrossLines, tcfg);
+	out.push(`degenerate across \n      → ${linesHit ? `flag (${linesHit.token} ×${linesHit.freq})` : "no"} (exp flag — escaped newlines) ${linesHit ? "✅" : "❌"}`);
+
+	// No-space giant token ("lorem" glued) — perfect-power clause.
+	const glued = findDegenerateRepetition("lorem".repeat(300), tcfg);
+	out.push(`degenerate glued token    → ${glued ? `flag (${glued.token} ×${glued.freq})` : "no"} (exp flag — perfect power) ${glued ? "✅" : "❌"}`);
+
+	// Turn weight: one degenerate turn = 2 consecutive points (warning on first
+	// sight), normal turns stay at 1.
+	const wDeg = detectionTurnWeight(mDet, tcfg);
+	const wTxt = detectionTurnWeight(dl("text", 0.8), tcfg);
+	out.push(`degenerate turn weight    → degenerate ${wDeg}, text ${wTxt} (exp 2, 1) ${wDeg === 2 && wTxt === 1 ? "✅" : "❌"}`);
 
 	return out;
 }

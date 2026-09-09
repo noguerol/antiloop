@@ -58,9 +58,10 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		`  similarity: ${(rt.config.similarityThreshold * 100).toFixed(0)}%  window: ${rt.config.detectionWindow}`,
 		`  tool sim: ${(rt.config.toolSimilarityThreshold * 100).toFixed(0)}%  tool repeat: ${rt.config.minToolRepeatCount}+ prior`,
 		`  result sim: ${(rt.config.resultSimilarityThreshold * 100).toFixed(0)}%  (same cmd + diff outcome = no loop)`,
+		`  degenerate: run ≥ ${rt.config.degenerateMaxRun} same word · freq ≥ ${rt.config.degenerateMaxFreq} @ ${(rt.config.degenerateMaxShare * 100).toFixed(0)}% (≥ ${rt.config.degenerateMinTokens} tokens) · weight ${rt.config.degenerateTurnWeight} · block bash ${yn(rt.config.blockDegenerateBash)}`,
 		`  task streams: ${yn(rt.config.detectTaskStreams)} (min ${rt.config.taskStreamMinCalls} calls, twins ≥ ${(rt.config.taskStreamTwinThreshold * 100).toFixed(0)}%)`,
 		"",
-		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)}`,
+		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)}`,
 		`footer: interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
 	];
 	if (rt.state.activeTaskStreams.length) {
@@ -91,6 +92,9 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "toolSim" as const, label: `🔧 call similarity: ${(c.toolSimilarityThreshold * 100).toFixed(0)}%`, description: "how identical tool calls must be to count as the same call" },
 		{ value: "toolRepeat" as const, label: `🔁 call repeats: ${c.minToolRepeatCount}+`, description: "how many times the same call must repeat before it flags" },
 		{ value: "resultSim" as const, label: `🧾 result similarity: ${(c.resultSimilarityThreshold * 100).toFixed(0)}%`, description: "same command + different result = progress, not a loop" },
+		// ── 🌀 Degenerate (intra-message meltdown) ───────────────────────
+		{ value: "degRun" as const, label: `🌀 degenerate run: ≥ ${c.degenerateMaxRun}`, description: "identical words in a row inside ONE message/call before it counts as stuck generation (lorem ×5145 class)" },
+		{ value: "degBlock" as const, label: `⛔ block degenerate bash: ${yn(c.blockDegenerateBash)}`, description: "stop a degenerate command before it executes (default on)" },
 		// ── 📋 Task streams ─────────────────────────────────────────
 		{ value: "streams" as const, label: `📋 task streams: ${yn(c.detectTaskStreams)}`, description: "batch work (punched_log / plan_manager / …) is not a loop" },
 		{ value: "streamMin" as const, label: `📋 stream min calls: ${c.taskStreamMinCalls}`, description: "calls of the same tool before a batch is recognized" },
@@ -99,6 +103,7 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "text" as const, label: `📝 text: ${yn(c.detectTextLoops)}`, description: "detect repeated text messages" },
 		{ value: "tool" as const, label: `🔧 tools: ${yn(c.detectToolLoops)}`, description: "detect repeated tool calls" },
 		{ value: "think" as const, label: `🧠 thinking: ${yn(c.detectThinkingLoops)}`, description: "detect repeated internal reasoning" },
+		{ value: "deg" as const, label: `🌀 degenerate: ${yn(c.detectDegenerate)}`, description: "detect ONE message stuck repeating a single word/token (no repeated peer needed)" },
 		// ── 🧹 ──────────────────────────────────────────────────────
 		{ value: "reset" as const, label: "🧹 reset state", description: "clear counters and history" },
 	]);
@@ -208,6 +213,19 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 			if (v !== undefined) { c.resultSimilarityThreshold = v; saveConfig(c); ctx.ui.notify(`result similarity: ${(v * 100).toFixed(0)}%`, "info"); }
 			break;
 		}
+		case "degRun": {
+			const v = await selectFrom(ctx, "🌀 degenerate run (identical words in a row inside one payload)", [
+				{ value: 8, label: "⚡ 8 (sensitive)" },
+				{ value: 16, label: "🎯 16 (default)" },
+				{ value: 24, label: "24" },
+				{ value: 48, label: "🐢 48 (relaxed)" },
+			]);
+			if (v !== undefined) { c.degenerateMaxRun = v; saveConfig(c); ctx.ui.notify(`degenerate run: ≥ ${v}`, "info"); }
+			break;
+		}
+		case "degBlock":
+			c.blockDegenerateBash = !c.blockDegenerateBash; saveConfig(c);
+			ctx.ui.notify(`block degenerate bash: ${yn(c.blockDegenerateBash)}`, "info"); break;
 		case "streams":
 			c.detectTaskStreams = !c.detectTaskStreams; saveConfig(c);
 			ctx.ui.notify(`task streams: ${yn(c.detectTaskStreams)}`, "info"); break;
@@ -248,6 +266,9 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		case "think":
 			c.detectThinkingLoops = !c.detectThinkingLoops; saveConfig(c);
 			ctx.ui.notify(`thinking: ${yn(c.detectThinkingLoops)}`, "info"); break;
+		case "deg":
+			c.detectDegenerate = !c.detectDegenerate; saveConfig(c);
+			ctx.ui.notify(`degenerate: ${yn(c.detectDegenerate)}`, "info"); break;
 		case "reset":
 			resetState(rt.state);
 			ctx.ui.notify("🧹 state reset", "info");

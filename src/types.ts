@@ -17,6 +17,26 @@ export interface AntiloopConfig {
 	 */
 	ignoredSteerLimit: number;
 	/**
+	 * Intra-message degenerate repetition (the "lorem \u00d75145" meltdown class): a model
+	 * stuck emitting the same token hundreds of times INSIDE one message / tool call.
+	 * Unlike the other detectors it needs no peer message: one pathological payload is
+	 * already conclusive. Fires on the first occurrence; each degenerate turn is weighted
+	 * (degenerateTurnWeight, default 2) so a single meltdown reaches the warning level.
+	 */
+	detectDegenerate: boolean;
+	/** Minimum normalized tokens in a payload before it is scanned (shorter = not conclusive). */
+	degenerateMinTokens: number;
+	/** Longest run of ONE identical word that flags a payload as degenerate. */
+	degenerateMaxRun: number;
+	/** Total occurrences of one word (anywhere, interleaved) that flags when combined with share. */
+	degenerateMaxFreq: number;
+	/** Word frequency share (freq/total) needed together with degenerateMaxFreq. */
+	degenerateMaxShare: number;
+	/** How many consecutive-detection points ONE degenerate turn adds (2 = warn on first sight). */
+	degenerateTurnWeight: number;
+	/** Block a bash tool call whose command shows degenerate repetition BEFORE it executes. */
+	blockDegenerateBash: boolean;
+	/**
 	 * How close tool-call arguments must be (0..1) to count as the SAME call.
 	 * High by default: long bash commands share scaffolding (env setup, flags,
 	 * paths) even when they are different operations — a parameter sweep or a
@@ -66,7 +86,7 @@ export interface AntiloopConfig {
 	toggleShortcut: string;
 }
 
-export type LoopKind = "text" | "tool" | "thinking" | "structural";
+export type LoopKind = "text" | "tool" | "thinking" | "structural" | "degenerate";
 
 export interface LoopDetection {
 	type: LoopKind;
