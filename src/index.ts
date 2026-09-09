@@ -48,6 +48,7 @@ function newState(): AntiloopState {
 		lastDetectedTurnIndex: -1,
 		steerDelivered: false,
 		ignoredSteerCount: 0,
+		turnSeq: 0,
 	};
 }
 
@@ -273,7 +274,11 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 				thinking: thinking || undefined,
 				toolCalls: toolCalls.length ? toolCalls : undefined,
 				timestamp: Date.now(),
-				turnIndex: state.recentMessages.length,
+				// Monotonic: the array is trimmed below (detectionWindow + 5), so
+				// recentMessages.length would repeat after the first trim and the
+				// turn_end dedupe guard (turnIndex === lastDetectedTurnIndex) would
+				// skip every later message — antiloop going blind mid-session.
+				turnIndex: state.turnSeq++,
 			});
 		}
 		if (state.recentMessages.length > config.detectionWindow + 5) {
