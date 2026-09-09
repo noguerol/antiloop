@@ -6,13 +6,14 @@
 
 # Antiloop — Loop Detection and Break for pi
 
-**Antiloop watches every assistant message, tool call and thinking block, and forces the model out of reasoning loops before they eat your context and your patience.** Five simultaneous detection strategies (text similarity, tool-call sequences, thinking content, structural openings, and intra-message degenerate repetition) find loops that humans miss — and progressive intervention (warning → force break → abort) tells the model to take a different approach, without you having to babysit it.
+**Antiloop watches every assistant message, tool call and thinking block, and forces the model out of reasoning loops before they eat your context and your patience.** Six simultaneous detection strategies (text similarity, tool-call sequences, thinking content, structural openings, degenerate repetition, no-progress outcome runs) find loops that humans miss — and progressive intervention (warning → force break → abort) tells the model to take a different approach, without you having to babysit it.
 
 ---
 
 ## Features
 
-- **Five detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + near-identical arguments + same outcome — result-aware, so retries that make progress don't false-positive), thinking blocks, structural opening-phrase patterns, and **degenerate repetition** (a single message/call stuck repeating one word hundreds of times — the `noguerol ×5145` meltdown — caught at `message_end` with no repeated peer needed, and degenerate bash commands blocked before they execute)
+- **Six detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + near-identical arguments + same outcome — result-aware, so retries that make progress don't false-positive), thinking blocks, structural opening-phrase patterns, **degenerate repetition** (a single message/call stuck repeating one word hundreds of times — the `noguerol ×5145` meltdown — caught at `message_end` with no repeated peer needed, and degenerate bash commands blocked before they execute), and **no-progress outcome runs** (the NFS `test A…QQQ` class: dozens of near-identical re-runs of the same experiment, every one ending in the *same failing outcome* — args mutate so tool-loop can't see it; the repeated failure signature can)
+- **Stays alive in long sessions** — tracked messages carry a monotonic sequence number, so trimming the sliding window can never make the dedupe guard skip later messages (a bug that silently blinded antiloop after ~15 tracked messages)
 - **Task-stream recognition (batch work)** — when another extension (e.g. `punched` appending lines to pi.md, or `plan` adding tasks) makes the model call the *same* tool many times with *different* content, antiloop recognizes it as N distinct tasks of one type and stays silent — no warning, no force break. A genuine loop (the *same* call repeated verbatim) is still caught
 - **Progressive intervention** — `warning` reminds the model to vary its approach; `force break` steers a real break message into the running agent before its next LLM call; `abort` stops the run entirely
 - **Configurable thresholds** — independent dials for similarity cutoff, warning/force-break/abort counts, detection window, and which strategies are on
@@ -99,11 +100,13 @@ Detection strategies:
   Tool loops: ✅
   Thinking loops: ✅
   Degenerate: ✅
+  Outcome (no-progress): ✅
 
 Recent detections:
   [text] Text similarity 85% with message 3 (2m ago)
   [tool] repeated 3x: bash (5m ago)
   [degenerate] bash command: degenerate repetition — "noguerol" ×5145 (5m ago)
+  [outcome] no progress: 9 near-identical bash attempts with the same failing outcome (5m ago)
 ```
 
 ### `/antiloop config`
@@ -127,6 +130,7 @@ Grouped interactive menu showing the current value in each option:
 - **🧾 result similarity** — `95 / 80 / 60%` — how similar captured results must be to count as the *same outcome*; a repeated command that starts producing a different result is progress, not a loop (default 80%)
 - **🌀 degenerate run** — `8 / 16 / 24 / 48` — identical words in a row inside ONE message/call before it counts as stuck generation (default 16; the `noguerol ×5145` class)
 - **⛔ block degenerate bash** — on/off — refuse a degenerate bash command before it executes, feeding the reason back to the model (default on)
+- **📉 no-progress after** — `4 / 6 / 8 / 12` — same failing outcome repeated this many times (near-identical args) before flagging (default 8; the NFS `test A…QQQ` class)
 
 **📋 Task streams** — batch work (punched_log, plan_manager, …) is N tasks of one type, not a loop
 - **📋 task streams** — on/off — recognize that batch work and stay silent
@@ -138,6 +142,7 @@ Grouped interactive menu showing the current value in each option:
 - **🔧 tools** — on/off — detect repeated tool calls
 - **🧠 thinking** — on/off — detect repeated internal reasoning
 - **🌀 degenerate** — on/off — detect one message stuck repeating a single word/token (no repeated peer needed)
+- **📉 outcome** — on/off — detect many near-identical attempts all ending in the same failing outcome (no progress)
 
 **🧹 reset state** — clear all counters and history
 
@@ -170,6 +175,11 @@ degenerate legit cmd      → ok (exp ok) ✅
 degenerate interleaved    → flag (noguerol ×150) (exp flag — freq/share clause) ✅
 degenerate glued token    → flag (noguerol ×300) (exp flag — perfect power) ✅
 degenerate turn weight    → degenerate 2, text 1 (exp 2, 1) ✅
+outcome fires on 9th      → outcome (9 near-identical bash attempts, same failing outcome) ✅   ← v1.6.1: NFS test-A…QQQ class
+outcome needs 8 prior     → silent (exp silent at 5 attempts) ✅
+outcome converging sweep  → silent (exp silent — outcomes differ = progress) ✅
+outcome diff failures     → silent (exp silent — error changed = progress) ✅
+outcome identical OKs     → silent (exp silent — success repeats ≠ loop) ✅
 ```
 
 ## How It Works
@@ -185,6 +195,7 @@ After every assistant `message_end` event, antiloop extracts the new content (te
 | Thinking | Internal reasoning/thinking blocks | Same as text |
 | Structural | First 10 words of each message | Opening-phrase similarity ≥ 90% across ≥ 3 messages |
 | Degenerate | One single message/call (no peer needed) | Run-length + frequency of identical words inside the payload: ≥ `degenerateMaxRun` (default 16) consecutive identical words, or one word ≥ `degenerateMaxFreq`× at ≥ `degenerateMaxShare` of all tokens; plus a perfect-power check for glued no-space tokens. Scanned at `message_end` — before the tool calls execute — and on every `bash` `tool_call` (blocking gate) |
+| Outcome | Single tool calls across the window, after the last user input | ≥ `outcomeMinRepeats` (default 8) PRIOR attempts with args ≥ `outcomeArgSimilarity` (0.85) similar AND the same *failing* outcome (failure signatures compared at ≥ `outcomeSigThreshold`, 0.7; identical OK results never count — they're the norm for batches). Catches mutated re-run loops the tool detector can't see (labels/permutations change every turn) |
 | Task stream | Same tool, many calls | When a tool appears ≥ `taskStreamMinCalls` times (default 3) in the window and *no two* calls are near-identical (`taskStreamTwinThreshold`, default 99%), the tool is an active batch: N different tasks of one type (e.g. `punched_log` appends, `plan_manager` task adds). Those calls are exempt from tool-loop detection, and text/thinking/structural patterns that only involve those batch messages are suppressed too. If even one call pair is a twin (the same task repeated), the tool is *not* a stream and detection proceeds normally |
 
 Each detected pair becomes a `LoopDetection { type, similarity, messageIndices, description }` and the consecutive counter increases (a degenerate turn counts `degenerateTurnWeight`, default 2 — warning on first sight).
@@ -321,6 +332,46 @@ row inside a ≥ 50-token payload (verified against the actual sequential bash
 sweeps that motivated the tool-loop threshold). Only `bash` gets the blocking
 gate — writing a repetitive *file* (e.g. a user-requested padding fixture) is
 alerted and escalated, not refused.
+
+### No-progress outcome runs: mutated re-runs, same wall
+
+A subtler meltdown than the degenerate one: the model re-runs the SAME
+experiment over and over, mutating a cosmetic label or permutation each time
+so no call ever repeats verbatim — while the outcome stays the SAME FAILURE.
+Real case (same session, rows 95–249): ~90 ssh `exportfs`/`mount` tests,
+labels `test A` … `test QQQ`, targets alternating Javi/Compartido — every one
+ending `access denied` / `rc=32`, with fresh journalctl noise per attempt.
+The tool-loop detector is blind to it BY DESIGN (args mutate every turn:
+mean adjacent trigram similarity 0.93, but the label always changes, so the
+same call never recurs `minToolRepeatCount` times) and results only *veto*
+tool loops today — nothing used "same outcome repeated" as a positive signal.
+
+Antiloop v1.6.1's **outcome detector** closes exactly that gap, conservatively:
+
+- the LAST turn's single tool call must have a captured result that is a
+  FAILURE (fingerprints carry an error signature — `ok|fail|sig|…` — extracted
+  around the first failure marker over the FULL output, because a tool run can
+  fail with `isError=false`: the ssh pipeline exits 0 while `rc=32` lives
+  inside the text);
+- at least `outcomeMinRepeats` (default 8) PRIOR single-call turns (all after
+  the last real user message) must share BOTH args ≥ `outcomeArgSimilarity`
+  (0.85 — the same experiment reshuffled) AND the same failure signature
+  (digit-stripped signatures compared at `outcomeSigThreshold`, 0.7 — mount
+  targets that legitimately vary between attempts survive, journalctl noise
+  doesn't).
+
+Guarantees preserved: converging sweeps change outcome → silent; different
+failures = evolving diagnosis → silent; identical OKs (task-stream batches,
+file writes, idempotent verifications) never count as failures → silent;
+user-steered turns don't count → only the autonomous stretch is judged.
+Because the signal is proven no-progress, one such turn adds
+`degenerateTurnWeight` (2) points → warning on the crossing turn, force-break
+steer on the next, hard stop shortly after if the same wall persists. On the
+real session this fires at `test MM` (warn) → `NN` (steer) → `PP` (abort) —
+~50 wasted experiment turns cut.
+
+Tunables: `detectOutcomeLoops`, `outcomeMinRepeats` (lower = earlier cutoff),
+`outcomeArgSimilarity`, `outcomeSigThreshold`.
 ```
 
 ### Sliding window
@@ -348,6 +399,10 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
   "degenerateMaxShare": 0.4,
   "degenerateTurnWeight": 2,
   "blockDegenerateBash": true,
+  "detectOutcomeLoops": true,
+  "outcomeMinRepeats": 8,
+  "outcomeArgSimilarity": 0.85,
+  "outcomeSigThreshold": 0.7,
   "detectTaskStreams": true,
   "taskStreamMinCalls": 3,
   "taskStreamTwinThreshold": 0.99,
@@ -379,6 +434,10 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 | `degenerateMaxShare` | `0.4` | Frequency share (freq/total tokens) required together with `degenerateMaxFreq` |
 | `degenerateTurnWeight` | `2` | Consecutive-detection points added by one degenerate turn (2 = warning on first sight) |
 | `blockDegenerateBash` | `true` | Block a degenerate `bash` command in the `tool_call` hook before it executes; the reason is fed back to the model as the tool error |
+| `detectOutcomeLoops` | `true` | No-progress outcome runs: ≥ `outcomeMinRepeats` near-identical attempts (args ≥ `outcomeArgSimilarity`) all ending in the *same failing outcome* — the NFS `test A…QQQ` class |
+| `outcomeMinRepeats` | `8` | Prior same-failure attempts (inside the window, after the last user input) required before the outcome detector fires |
+| `outcomeArgSimilarity` | `0.85` | How similar args must be to count as the *same experiment reshuffled* (mutations of labels/permutations stay under it — distinct tasks don't) |
+| `outcomeSigThreshold` | `0.7` | Minimum similarity between digit-stripped failure signatures to count as the *same failure* |
 | `detectTaskStreams` | `true` | Recognize homogeneous batch work (same tool called with distinct content — e.g. punched/plan/obsidian extensions) and stay silent; see [task streams](#task-streams-n-tasks-of-one-type--a-loop) |
 | `taskStreamMinCalls` | `3` | Same-tool calls required inside the window before a task stream is recognized |
 | `taskStreamTwinThreshold` | `0.99` | Arguments this similar (or identical) count as *the same task* — a twin invalidates the stream and re-enables normal loop detection |
@@ -400,7 +459,8 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 5. **Watch the log** — `/antiloop log` shows what's actually triggering. If you see false positives, raise `similarityThreshold` instead of disabling the strategy entirely.
 6. **Let user input clear state** — each user message decays the consecutive counter by 2, so a fresh prompt naturally resets without `/antiloop reset`.
 7. **Degenerate detector needs no tuning for most setups** — a run of ≥ 16 identical words (or one word ≥ 40% of a ≥ 50-token payload) inside a single message is conclusive stuck generation; the 46 KB `noguerol ×5145` SSH-wordlist meltdown is caught on first sight (warning), its bash never executes (`blockDegenerateBash`), and a second consecutive meltdown gets the force-break steer. If a model legitimately writes repetitive payloads, raise `degenerateMaxRun` / `degenerateMaxFreq` via `/antiloop config` — don't disable the detector.
-8. **`/antiloop test`** — runs the real detection engine (text + tool-call + task-stream + degenerate regression cases) to verify calibration after any change.
+8. **Outcome detector catches mutated re-run loops** — a model that re-issues the same experiment with cosmetic changes (labels, permutations) while every attempt fails identically gets a warning after `outcomeMinRepeats` (8) same-failure attempts, a steer on the next, and a hard stop shortly after. Converging sweeps, evolving failures and repeated successes stay silent by design. Lower `outcomeMinRepeats` if you want earlier cutoffs.
+9. **`/antiloop test`** — runs the real detection engine (text + tool-call + task-stream + degenerate + outcome regression cases) to verify calibration after any change.
 
 ## Architecture
 
@@ -427,7 +487,7 @@ Modular extension with zero external dependencies (only pi's bundled `@earendil-
 - **Sliding window** — only the last `detectionWindow` messages participate, capping memory at O(W × message_size)
 - **Early bail** — short messages and empty tool calls skip similarity computation entirely; the degenerate scan is a single linear tokenization pass
 - **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` + a custom `ctx.ui.setFooter` component for the persistent footer indicator, live level info, and the `esc+a` keyboard toggle (`ctx.ui.onTerminalInput`, never consumes input)
-- **Hooks** — `message_end` (track messages + tool call ids, and pre-handle degenerate meltdowns — the message is complete but its tools haven't executed yet), `tool_call` (block degenerate `bash` commands before they run), `turn_end` (attach result fingerprints, detect, and intervene: steer the force break / abort the run), `input` (decay on real user messages only), `session_start` (load config + install footer + reset), `session_shutdown` (restore built-in footer)
+- **Hooks** — `message_end` (track messages + tool call ids with a monotonic sequence so the sliding-window trim can never collide turn indices, and pre-handle degenerate meltdowns — the message is complete but its tools haven't executed yet), `tool_call` (block degenerate `bash` commands before they run), `turn_end` (attach result fingerprints with failure signatures, detect — including no-progress outcome runs — and intervene: steer the force break / abort the run), `input` (decay on real user messages only), `session_start` (load config + install footer + reset), `session_shutdown` (restore built-in footer)
 - **Intervention runs on the turn loop, not on user prompts** — escalation is decided at `turn_end` (and at `message_end` for the self-contained degenerate signal), the break is steered into the running agent before its next LLM call, and the guaranteed hard stop aborts the run (`ctx.abort`, fire-and-forget — never awaited, so the hook can't deadlock). No custom-role messages are injected into the conversation at any level (steering a real user message + aborting are the only levers; custom-role injections were removed because a model can stall on an unexpected injected message)
 
 ## License

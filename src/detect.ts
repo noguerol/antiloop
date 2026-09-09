@@ -185,10 +185,13 @@ export function degenerateDescription(hit: DegenerateHit): string {
 	return `${hit.where}: degenerate repetition — "${hit.token}" ×${hit.freq} (${share}% of ${hit.total} tokens, longest run ${hit.maxRun})`;
 }
 
-/** Consecutive-detection weight of a detection turn (degenerate = heavy, so a
- * single meltdown already reaches the warning level and escalates on repeat). */
+/** Consecutive-detection weight of a detection turn. The strong
+ * self-contained signals (degenerate meltdown, proven no-progress outcome run)
+ * add degenerateTurnWeight (default 2) points so the FIRST one already reaches
+ * the warning level and escalation is fast on repeat. */
 export function detectionTurnWeight(detections: LoopDetection[], config: AntiloopConfig): number {
-	return detections.some((d) => d.type === "degenerate") ? Math.max(1, config.degenerateTurnWeight) : 1;
+	const strong = detections.some((d) => d.type === "degenerate" || d.type === "outcome");
+	return strong ? Math.max(1, config.degenerateTurnWeight) : 1;
 }
 
 function similarity(a: string, b: string): number {
@@ -231,7 +234,18 @@ export function resultFingerprint(
 	}
 	const norm = normalizeText(text);
 	if (!norm.length) return undefined;
-	return `${isError ? "err" : "ok"}|${norm.slice(-400)}`;
+	// A tool run can FAIL while isError stays false (the NFS mount errors: the
+	// ssh pipeline exits 0 after grep/echo, rc=32 lives inside the output). The
+	// tail-only fingerprint would cut the failure markers away AND the tail is
+	// noisy (journalctl timestamps differ per attempt), so for failures we keep
+	// a SHORT ERROR SIGNATURE around the first failure marker — it repeats
+	// verbatim across attempts of the same failure and makes same-outcome
+	// comparisons robust. Formats: "err|…" / "ok|fail|sig|…|tail" / "ok|…".
+	const failed = FAIL_MARKERS.test(norm);
+	if (!failed) return `${isError ? "err" : "ok"}|${norm.slice(-400)}`;
+	const at = norm.search(FAIL_MARKERS);
+	const sig = norm.slice(Math.max(0, at - 60), at + 160);
+	return `${isError ? "err" : "ok"}|fail|${sig}|${norm.slice(-400)}`;
 }
 
 /** Same outcome = identical fingerprint, or high similarity of the tails. */
@@ -244,6 +258,44 @@ function sameOutcome(a: string, b: string, threshold: number): boolean {
 	}
 	const s = similarity(a, b);
 	return s >= threshold && s > 0;
+}
+
+// Failure markers on a NORMALIZED fingerprint tail (lowercased, punctuation
+// stripped — "rc=32" arrives as "rc32"). A conservative "this attempt failed"
+// test: rc ≠ 0, denials, missing files, refusals, syntax crashes… Generic
+// words like "error"/"failed" are intentionally NOT markers (legit outputs
+// like "0 failed, 12 passed" must not count as failures).
+const FAIL_MARKERS =
+	/\b(denied|no such file|not found|cannot|unable|refused|syntax error|timed out|timeout|exception|traceback|fatal|core dumped|rc\s*[1-9]\d*)\b/i;
+
+/** True when a captured result fingerprint represents a FAILED attempt.
+ * Used by the no-progress outcome detector so only repeated FAILURES (not
+ * repeated identical successes, which are the norm for task-stream batches
+ * like "logged" or file writes) count as a stuck loop. */
+export function isFailResult(fp: string | undefined): boolean {
+	if (!fp) return false;
+	if (fp.startsWith("err|") || fp.startsWith("ok|fail|")) return true;
+	return FAIL_MARKERS.test(fp);
+}
+
+/** The short error signature embedded in a failure fingerprint
+ * ("ok|fail|SIG|tail"), if present. */
+function failSig(fp: string): string | undefined {
+	const m = /^(?:err|ok)\|fail\|(.*?)\|/.exec(fp);
+	return m ? m[1] : undefined;
+}
+
+/** Same-FAILURE comparison for the outcome detector. Prefers the embedded error
+ * signatures (they repeat across attempts of the same failure) with digits
+ * stripped — timestamps, PIDs and rc values are noise; the target words that
+ * legitimately vary between attempts (Javi vs Compartido) survive but the
+ * threshold is looser than the veto threshold on purpose. Falls back to the
+ * full fingerprints when no signature is present. */
+function sameFailure(a: string, b: string, threshold: number): boolean {
+	const sa = failSig(a);
+	const sb = failSig(b);
+	if (sa && sb) return sameOutcome(sa.replace(/\d+/g, ""), sb.replace(/\d+/g, ""), threshold);
+	return sameOutcome(a, b, threshold);
 }
 
 function toolCallsSimilar(
@@ -438,6 +490,68 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 		}
 	}
 
+	// -------------------------------------------------------------------
+	// No-progress outcome runs (v1.6.1).
+	//
+	// The NFS-test session (/home/j 2026-09-09, rows 95–249): ~90 mutated
+	// re-runs of the SAME experiment (sshpass+sudo+exportfs+mount, labels
+	// "test A"…"test QQQ"), every one failing identically (rc=32 / access
+	// denied). The tool-loop detector is blind to it BY DESIGN: args mutate
+	// every turn (mean adjacent trigram similarity 0.93, but the label always
+	// changes) so the same call never recurs >= minToolRepeatCount times, and
+	// identical results only VETO tool loops — nothing uses "same outcome
+	// repeated" as a positive signal. A human sees it instantly: many attempts,
+	// same wall, zero progress.
+	//
+	// Signal: the LAST turn's single tool call has a captured result, and at
+	// least outcomeMinRepeats PRIOR single-call turns (after the last real user
+	// message — an autonomous stretch, not user-steered iteration) share BOTH
+	// args >= outcomeArgSimilarity (the same experiment reshuffled) AND the same
+	// outcome (>= resultSimilarityThreshold). Legit work is untouched: distinct
+	// operations fail with distinct output; converging sweeps change outcome;
+	// batch/stream messages are excluded; a success interspersed resets the
+	// class. similarity 0.99 => after a force break, further same-outcome turns
+	// count as "ignoring the break" (isVerbatimRepeat) and escalate to the hard
+	// stop, exactly like verbatim tool loops.
+	// -------------------------------------------------------------------
+	if (config.detectOutcomeLoops) {
+		const last = win[win.length - 1];
+		const lastCalls = last.toolCalls;
+		const afterUser = state.lastUserMessageTime;
+		if (lastCalls && lastCalls.length === 1) {
+			const lc = lastCalls[0];
+			// Failure gate: only repeated FAILURES prove no progress. Task-stream
+			// batches (punched_log appends, obsidian/file writes) legitimately
+			// produce the SAME OK outcome every call — they must never count. And
+			// batch messages must NOT be skipped here: a "bash ×N stream" with
+			// identical failures is exactly the no-progress loop to catch.
+			if (lc.result && isFailResult(lc.result)) {
+				let matches = 0;
+				for (let i = 0; i < win.length - 1; i++) {
+					const m = win[i];
+					if (m.timestamp <= afterUser) continue; // user-steered turns don't count
+					const prev = m.toolCalls;
+					if (!prev || prev.length !== 1) continue;
+					const pc = prev[0];
+					if (pc.name !== lc.name || !pc.result) continue;
+					if (!sameFailure(lc.result, pc.result, config.outcomeSigThreshold)) continue;
+					if (!argsTwin(lc.args, pc.args, config.outcomeArgSimilarity)) continue;
+					matches++;
+				}
+				if (matches >= config.outcomeMinRepeats) {
+					out.push({
+						type: "outcome",
+						similarity: 0.99,
+						messageIndices: [msgs.length - 1],
+						description:
+							`no progress: ${matches + 1} near-identical ${lc.name} attempts (args ≥ ${(config.outcomeArgSimilarity * 100).toFixed(0)}% similar) with the same failing outcome — “${lc.result.slice(0, 90)}”`,
+						timestamp: now,
+					});
+				}
+			}
+		}
+	}
+
 	if (config.detectThinkingLoops) {
 		const last = win[win.length - 1];
 		if (last.thinking && last.thinking.length > 50) {
@@ -471,11 +585,13 @@ export function nextLevel(consecutiveDetections: number, config: AntiloopConfig)
 }
 
 /** True when detections prove the model repeated a message/tool call essentially
- * verbatim (≥98% text similarity or an identical tool-loop). Weaker signals
- * (thinking echoes, structural repeated openings at 90%) do NOT count — a model
- * that only *thinks* in circles but varies its actual output is still making an
- * attempt and must not be hard-stopped. Used post-force-break: only verbatim
- * repeats prove the model ignored the break instruction. */
+ * verbatim (≥98% text similarity or an identical tool-loop), OR produced a
+ * degenerate meltdown, OR kept re-running the same experiment with the same
+ * failing outcome (no-progress, sim 0.99). Weaker signals (thinking echoes,
+ * structural repeated openings at 90%) do NOT count — a model that only *thinks*
+ * in circles but varies its actual output is still making an attempt and must
+ * not be hard-stopped. Used post-force-break: only verbatim repeats and proven
+ * no-progress repeats show the model ignored the break instruction. */
 export function isVerbatimRepeat(detections: LoopDetection[]): boolean {
 	return detections.some((d) => d.type !== "thinking" && d.similarity >= 0.98);
 }
@@ -559,11 +675,12 @@ export function runSelfTest(): string[] {
 		detectTaskStreams: true, taskStreamMinCalls: 3, taskStreamTwinThreshold: 0.99,
 		detectDegenerate: true, degenerateMinTokens: 50, degenerateMaxRun: 16,
 		degenerateMaxFreq: 60, degenerateMaxShare: 0.4, degenerateTurnWeight: 2, blockDegenerateBash: true,
+		detectOutcomeLoops: true, outcomeMinRepeats: 8, outcomeArgSimilarity: 0.85, outcomeSigThreshold: 0.7,
 	};
 	const asState = (recentMessages: TrackedMessage[]): AntiloopState =>
 		({ recentMessages, detections: [], activeTaskStreams: [], currentLevel: 0,
 			consecutiveDetections: 0, inForcedBreak: false, totalDetections: 0,
-			lastUserMessageTime: 0, lastDetectedTurnIndex: -1,
+			lastUserMessageTime: 0, lastDetectedTurnIndex: -1, turnSeq: 0,
 			steerDelivered: false, ignoredSteerCount: 0 });
 	const NARR = "Now I will append the next decision entry to the project memory document so we keep the context.";
 
@@ -664,6 +781,96 @@ export function runSelfTest(): string[] {
 	const wDeg = detectionTurnWeight(mDet, tcfg);
 	const wTxt = detectionTurnWeight(dl("text", 0.8), tcfg);
 	out.push(`degenerate turn weight    → degenerate ${wDeg}, text ${wTxt} (exp 2, 1) ${wDeg === 2 && wTxt === 1 ? "✅" : "❌"}`);
+
+	// --- v1.6.1: no-progress outcome runs (mutated re-runs, same outcome) ---
+	// Regression: the NFS session — ~90 mutated re-runs of the SAME experiment
+	// (ssh exportfs/mount, labels test A…test QQQ, targets alternating Javi /
+	// Compartido), every one failing rc=32. Args mutate each turn (same call
+	// never recurs → tool-loop silent) and journalctl noise varies per attempt,
+	// but the FAILURE SIGNATURE repeats: that IS the loop. Fires on the 9th
+	// attempt (8 prior same-failure matches ≥ outcomeMinRepeats).
+	const nfsCmd = (label: string, target: string) =>
+		argJson(
+			`sshpass -p X ssh -o ConnectTimeout=10 noguerol@petete 'cd /tmp && echo X | sudo -S bash -c "echo --- test ${label}: rootdir=/volume2, absolute paths, fsid=0 and 1, mount /${target} ---; ` +
+			`cat > /etc/exports << EOF\n/volume2/NAS-8TB-Javi *(rw,sync,no_subtree_check,fsid=0)\nEOF\nexportfs -ra\nsystemctl restart nfs-server\n` +
+			`mount -t nfs4 -o vers=4.2 127.0.0.1:/${target} /tmp/nfstest 2>&1; echo rc=\$?; journalctl -u nfs-mountd | tail -4"' 2>&1`,
+		);
+	const nfsFailFor = (target: string, sec: number) =>
+		resultFingerprint(
+			[
+				{
+					type: "text",
+					text:
+						`--- mount /${target} --- | mount.nfs4: access denied by server while mounting 127.0.0.1:/${target} rc=32 | ` +
+						`Sep 09 18:${sec} petete systemd[1]: Started nfs-mountd.service (PID ${1000 + sec})`,
+				},
+			],
+			false,
+		)!;
+	const nfsOk = resultFingerprint([{ type: "text", text: "rc=0 | TARGET SOURCE FSTYPE | /tmp/nfstest 127.0.0.1:/  nfs4  rw,relatime" }], false)!;
+	const targets = ["NAS-8TB-Javi", "NAS-8TB-Compartido"];
+	const nfsMsgs = [..."ABCDEFGHI"].map((l, idx) =>
+		mk("", [{ name: "bash", args: nfsCmd(l, targets[idx % 2]), result: nfsFailFor(targets[idx % 2], 100 + idx) }]),
+	);
+	const nfsDet = detectLoops(asState(nfsMsgs), tcfg);
+	const nfsHit = nfsDet.find((d) => d.type === "outcome");
+	out.push(`outcome fires on 9th      → ${nfsHit ? `outcome (${nfsHit.description.slice(0, 100)}…)` : nfsDet.map((d) => d.type).join(",") || "no"} (exp outcome — mixed targets) ${nfsHit ? "✅" : "❌"}`);
+	out.push(`outcome weight            → ${detectionTurnWeight(nfsDet, tcfg)} (exp 2) ${detectionTurnWeight(nfsDet, tcfg) === 2 ? "✅" : "❌"}`);
+	out.push(`outcome post-steer = ignored→ ${isVerbatimRepeat(nfsDet) ? "yes" : "no"} (exp yes — same failing outcome after the break) ${isVerbatimRepeat(nfsDet) ? "✅" : "❌"}`);
+
+	// Below the repeat count: 5 identical-failure attempts → still trying, silent.
+	const fewMsgs = [..."ABCDE"].map((l, idx) =>
+		mk("", [{ name: "bash", args: nfsCmd(l, targets[idx % 2]), result: nfsFailFor(targets[idx % 2], 100 + idx) }]),
+	);
+	const fewDet = detectLoops(asState(fewMsgs), tcfg);
+	out.push(`outcome needs 8 prior     → ${fewDet.some((d) => d.type === "outcome") ? "outcome" : "silent"} (exp silent at 5 attempts) ${!fewDet.some((d) => d.type === "outcome") ? "✅" : "❌"}`);
+
+	// Converging sweep (v1.1 guarantee): similar args but the outcome CHANGES
+	// (progress!) — must stay silent even with many attempts.
+	const progMsgs = [..."ABCDEFGHIJ"].map((l, idx) =>
+		mk("", [
+			{
+				name: "bash",
+				args: nfsCmd(l, targets[idx % 2]),
+				result:
+					idx === 9
+						? nfsOk
+						: resultFingerprint(
+								[{ type: "text", text: `attempt ${idx}: failed with rc=${idx + 30} reason=${idx % 3}` }],
+								true,
+						  )!,
+			},
+		]),
+	);
+	const progDet = detectLoops(asState(progMsgs), tcfg);
+	out.push(`outcome converging sweep  → ${progDet.some((d) => d.type === "outcome") ? "outcome" : "silent"} (exp silent — outcomes differ = progress) ${!progDet.some((d) => d.type === "outcome") ? "✅" : "❌"}`);
+
+	// Different FAILURE kinds with similar args (denied vs timeout vs no-such-file)
+	// = evolving diagnosis, not the same wall — silent too.
+	const diffFailMsgs = [..."ABCDEFGHIJ"].map((l, idx) => {
+		const reasons = ["access denied by server", "timed out after 90 seconds", "No such file or directory"];
+		const r = reasons[idx % 3];
+		return mk("", [
+			{ name: "bash", args: nfsCmd(l, targets[idx % 2]), result: resultFingerprint([{ type: "text", text: `mount failed: ${r} rc=32` }], false)! },
+		]);
+	});
+	const diffFailDet = detectLoops(asState(diffFailMsgs), tcfg);
+	out.push(`outcome diff failures     → ${diffFailDet.some((d) => d.type === "outcome") ? "outcome" : "silent"} (exp silent — error changed = progress) ${!diffFailDet.some((d) => d.type === "outcome") ? "✅" : "❌"}`);
+
+	// Task-stream coexistence: a punched_log batch with identical tool results
+	// must NOT count toward the outcome run (identical OK = normal batch).
+	const batchFail = resultFingerprint([{ type: "text", text: "logged" }], false)!;
+	const batchOutMsgs = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => mk(NARR, [{ name: "punched_log", args: noteArgs(String(n)), result: batchFail }]));
+	const batchOutDet = detectLoops(asState(batchOutMsgs), tcfg);
+	out.push(`outcome batch excluded    → ${batchOutDet.some((d) => d.type === "outcome") ? "outcome" : "silent"} (exp silent — identical OKs are batch norm) ${!batchOutDet.some((d) => d.type === "outcome") ? "✅" : "❌"}`);
+
+	// Failure gate: 9 near-identical attempts that all SUCCEED identically (e.g.
+	// re-verifying a working setup, or a file-write batch) must stay silent —
+	// only repeated FAILURES prove no progress.
+	const okMsgs = [..."ABCDEFGHI"].map((l, idx) => mk("", [{ name: "bash", args: nfsCmd(l, targets[idx % 2]), result: nfsOk }]));
+	const okDet = detectLoops(asState(okMsgs), tcfg);
+	out.push(`outcome identical OKs     → ${okDet.some((d) => d.type === "outcome") ? "outcome" : "silent"} (exp silent — success repeats ≠ loop) ${!okDet.some((d) => d.type === "outcome") ? "✅" : "❌"}`);
+	out.push(`isFailResult gate         → err| → ${isFailResult("err|boom") ? "fail" : "ok"}, rc32 → ${isFailResult("ok|rc32 denied") ? "fail" : "ok"}, rc0/ok → ${isFailResult("ok|rc 0 12 passed") ? "fail" : "ok"} (exp fail, fail, ok) ${isFailResult("err|boom") && isFailResult("ok|rc32 denied") && !isFailResult("ok|rc 0 12 passed") ? "✅" : "❌"}`);
 
 	return out;
 }

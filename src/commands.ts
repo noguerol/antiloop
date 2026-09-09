@@ -59,9 +59,10 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		`  tool sim: ${(rt.config.toolSimilarityThreshold * 100).toFixed(0)}%  tool repeat: ${rt.config.minToolRepeatCount}+ prior`,
 		`  result sim: ${(rt.config.resultSimilarityThreshold * 100).toFixed(0)}%  (same cmd + diff outcome = no loop)`,
 		`  degenerate: run ≥ ${rt.config.degenerateMaxRun} same word · freq ≥ ${rt.config.degenerateMaxFreq} @ ${(rt.config.degenerateMaxShare * 100).toFixed(0)}% (≥ ${rt.config.degenerateMinTokens} tokens) · weight ${rt.config.degenerateTurnWeight} · block bash ${yn(rt.config.blockDegenerateBash)}`,
+		`  outcome: same failing result ≥ ${rt.config.outcomeMinRepeats} attempts (args ≥ ${(rt.config.outcomeArgSimilarity * 100).toFixed(0)}% sim, sig ≥ ${(rt.config.outcomeSigThreshold * 100).toFixed(0)}%)`,
 		`  task streams: ${yn(rt.config.detectTaskStreams)} (min ${rt.config.taskStreamMinCalls} calls, twins ≥ ${(rt.config.taskStreamTwinThreshold * 100).toFixed(0)}%)`,
 		"",
-		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)}`,
+		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)} · outcome ${yn(rt.config.detectOutcomeLoops)}`,
 		`footer: interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
 	];
 	if (rt.state.activeTaskStreams.length) {
@@ -95,6 +96,8 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		// ── 🌀 Degenerate (intra-message meltdown) ───────────────────────
 		{ value: "degRun" as const, label: `🌀 degenerate run: ≥ ${c.degenerateMaxRun}`, description: "identical words in a row inside ONE message/call before it counts as stuck generation (noguerol ×5145 class)" },
 		{ value: "degBlock" as const, label: `⛔ block degenerate bash: ${yn(c.blockDegenerateBash)}`, description: "stop a degenerate command before it executes (default on)" },
+		// ── 📉 Outcome (no-progress) ────────────────────────────────
+		{ value: "outcomeMin" as const, label: `📉 no-progress after: ${c.outcomeMinRepeats}`, description: "same failing outcome repeated this many times (mutated args ≥ 85% similar) before flagging — the NFS test-A…QQQ class" },
 		// ── 📋 Task streams ─────────────────────────────────────────
 		{ value: "streams" as const, label: `📋 task streams: ${yn(c.detectTaskStreams)}`, description: "batch work (punched_log / plan_manager / …) is not a loop" },
 		{ value: "streamMin" as const, label: `📋 stream min calls: ${c.taskStreamMinCalls}`, description: "calls of the same tool before a batch is recognized" },
@@ -104,6 +107,7 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "tool" as const, label: `🔧 tools: ${yn(c.detectToolLoops)}`, description: "detect repeated tool calls" },
 		{ value: "think" as const, label: `🧠 thinking: ${yn(c.detectThinkingLoops)}`, description: "detect repeated internal reasoning" },
 		{ value: "deg" as const, label: `🌀 degenerate: ${yn(c.detectDegenerate)}`, description: "detect ONE message stuck repeating a single word/token (no repeated peer needed)" },
+		{ value: "outcome" as const, label: `📉 outcome: ${yn(c.detectOutcomeLoops)}`, description: "detect many near-identical attempts all ending in the SAME failing outcome (no progress)" },
 		// ── 🧹 ──────────────────────────────────────────────────────
 		{ value: "reset" as const, label: "🧹 reset state", description: "clear counters and history" },
 	]);
@@ -226,6 +230,16 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		case "degBlock":
 			c.blockDegenerateBash = !c.blockDegenerateBash; saveConfig(c);
 			ctx.ui.notify(`block degenerate bash: ${yn(c.blockDegenerateBash)}`, "info"); break;
+		case "outcomeMin": {
+			const v = await selectFrom(ctx, "📉 no-progress threshold (same failing outcome, near-identical args)", [
+				{ value: 4, label: "⚡ 4 (sensitive — long experiment series get cut early)" },
+				{ value: 6, label: "6" },
+				{ value: 8, label: "🎯 8 (default)" },
+				{ value: 12, label: "🐢 12 (relaxed)" },
+			]);
+			if (v !== undefined) { c.outcomeMinRepeats = v; saveConfig(c); ctx.ui.notify(`no-progress after: ${v}`, "info"); }
+			break;
+		}
 		case "streams":
 			c.detectTaskStreams = !c.detectTaskStreams; saveConfig(c);
 			ctx.ui.notify(`task streams: ${yn(c.detectTaskStreams)}`, "info"); break;
@@ -269,6 +283,9 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		case "deg":
 			c.detectDegenerate = !c.detectDegenerate; saveConfig(c);
 			ctx.ui.notify(`degenerate: ${yn(c.detectDegenerate)}`, "info"); break;
+		case "outcome":
+			c.detectOutcomeLoops = !c.detectOutcomeLoops; saveConfig(c);
+			ctx.ui.notify(`outcome: ${yn(c.detectOutcomeLoops)}`, "info"); break;
 		case "reset":
 			resetState(rt.state);
 			ctx.ui.notify("🧹 state reset", "info");
@@ -301,6 +318,7 @@ export function resetState(state: AntiloopState): void {
 	state.lastDetectedTurnIndex = -1;
 	state.steerDelivered = false;
 	state.ignoredSteerCount = 0;
+	state.turnSeq = 0;
 }
 
 async function runSelfTest(ctx: ExtensionCommandContext): Promise<void> {

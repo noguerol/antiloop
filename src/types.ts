@@ -37,6 +37,26 @@ export interface AntiloopConfig {
 	/** Block a bash tool call whose command shows degenerate repetition BEFORE it executes. */
 	blockDegenerateBash: boolean;
 	/**
+	 * No-progress outcome runs (v1.6.1): a model that keeps re-running the SAME
+	 * experiment with cosmetic mutations (labels/permutations) while the outcome
+	 * stays the SAME FAILURE — the real NFS session where ~90 near-identical
+	 * ssh exportfs/mount tests (test A … test QQQ) all failed rc=32. The
+	 * tool-loop detector can't see it: args mutate every turn so the same call
+	 * never recurs (labels differ), and results only VETO tool loops today.
+	 * Signal: >= outcomeMinRepeats PRIOR attempts inside the window whose args
+	 * are >= outcomeArgSimilarity similar AND whose captured result is the same
+	 * outcome (>= resultSimilarityThreshold), all after the last real user input.
+	 */
+	detectOutcomeLoops: boolean;
+	outcomeMinRepeats: number;
+	outcomeArgSimilarity: number;
+	/** Same-FAILURE gate for the outcome detector: minimum similarity between the
+	 * digit-stripped error signatures of two failing attempts to count as the
+	 * SAME failure. Looser than the veto threshold on purpose: the signature
+	 * repeats across attempts of the same wall even when legitimately varying
+	 * words (mount targets) sit inside it. */
+	outcomeSigThreshold: number;
+	/**
 	 * How close tool-call arguments must be (0..1) to count as the SAME call.
 	 * High by default: long bash commands share scaffolding (env setup, flags,
 	 * paths) even when they are different operations — a parameter sweep or a
@@ -86,7 +106,7 @@ export interface AntiloopConfig {
 	toggleShortcut: string;
 }
 
-export type LoopKind = "text" | "tool" | "thinking" | "structural" | "degenerate";
+export type LoopKind = "text" | "tool" | "thinking" | "structural" | "degenerate" | "outcome";
 
 export interface LoopDetection {
 	type: LoopKind;
@@ -114,6 +134,10 @@ export interface TrackedMessage {
 	thinking?: string;
 	toolCalls?: TrackedToolCall[];
 	timestamp: number;
+	/** Monotonic push sequence (state.turnSeq++), NOT the window index: the
+	 * recent-messages array is trimmed to detectionWindow+5, so an array-length
+	 * based index would collide after trimming and make the turn_end dedupe
+	 * guard skip every later message (antiloop going blind mid-session). */
 	turnIndex: number;
 }
 
@@ -136,6 +160,10 @@ export interface AntiloopState {
 	lastUserMessageTime: number;
 	/** turnIndex of the last tracked message detection already ran on. */
 	lastDetectedTurnIndex: number;
+	/** Monotonic sequence for the next tracked message's turnIndex (see
+	 * TrackedMessage.turnIndex). Persists across trims; reset on /reset and at
+	 * session start. */
+	turnSeq: number;
 	/** True once the force-break user message was steered into the current episode.
 	 * One steer per episode: repeated steering would spam the conversation. Cleared
 	 * when the episode decays (currentLevel back to 0) or on real user input. */
