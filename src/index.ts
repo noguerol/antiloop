@@ -1,6 +1,6 @@
 /**
  * antiloop — detect reasoning loops and intervene.
- * Hooks: message_end, input, turn_end, session_start, session_shutdown.
+ * Hooks: message_end, tool_call, input, turn_end, session_start, session_shutdown.
  * Commands: /antiloop [enable|disable|status|config|log|reset|test]
  *
  * Intervention model (v1.5):
@@ -15,9 +15,19 @@
  *     (≥98% similar / identical tool loop) ignoredSteerLimit times, antiloop
  *     hard-stops the run (ctx.abort).
  *   abort   (level 3, opt-in via abortThreshold) — stops the run outright.
+ *
+ * v1.6 adds the intra-message degenerate detector: a model whose decoder
+ * anchors on a token repeats it hundreds of times INSIDE one message / tool
+ * call (the real 46 KB bash "noguerol ×5145" meltdown). That needs no peer
+ * message, so it is caught at message_end — BEFORE the tool calls execute —
+ * and degenerate bash commands are additionally blocked in the tool_call
+ * hook (blockDegenerateBash). One degenerate turn counts degenerateTurnWeight
+ * (2) consecutive points: warning on first sight, force-break steer on the
+ * second consecutive meltdown, hard stop shortly after if it keeps repeating.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { loadConfig, saveConfig } from "./config.ts";
 import type { AntiloopState, LoopDetection, Runtime, TrackedToolCall } from "./types.ts";
@@ -235,7 +245,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	pi.on("message_end", async (event) => {
+	pi.on("message_end", async (event, ctx) => {
 		if (!config.enabled) return;
 		const msg = event.message;
 		if (msg.role !== "assistant") return;
@@ -269,6 +279,69 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		if (state.recentMessages.length > config.detectionWindow + 5) {
 			state.recentMessages = state.recentMessages.slice(-(config.detectionWindow + 5));
 		}
+
+		// v1.6 — degenerate meltdowns are handled HERE, at message_end, because
+		// turn_end only fires after tool execution (too late to stop the 46 KB
+		// "noguerol ×5000" bash from running) and an aborted generation may never
+		// reach turn_end at all. The signal is self-contained (one pathological
+		// payload, no peer message) so the full escalation ladder runs right now;
+		// the turn-guard makes the later turn_end pass skip this message and no
+		// detection is double-counted.
+		if (!config.detectDegenerate) return;
+		const { scanMessageDegenerate, degenerateDescription, nextLevel, isVerbatimRepeat } = await import("./detect.ts");
+		const hit = scanMessageDegenerate(content, toolCalls, config);
+		if (!hit) return;
+		const tracked = state.recentMessages[state.recentMessages.length - 1];
+		if (tracked) state.lastDetectedTurnIndex = tracked.turnIndex;
+		const prevLevel = state.currentLevel;
+		state.consecutiveDetections += Math.max(1, config.degenerateTurnWeight);
+		state.totalDetections++;
+		const det: LoopDetection = {
+			type: "degenerate",
+			similarity: 1,
+			messageIndices: [state.recentMessages.length - 1],
+			description: degenerateDescription(hit),
+			timestamp: Date.now(),
+		};
+		state.detections.push(det);
+		if (state.detections.length > config.maxHistoryEntries) {
+			state.detections = state.detections.slice(-config.maxHistoryEntries);
+		}
+		applyLevel(nextLevel(state.consecutiveDetections, config));
+		const level = state.currentLevel;
+
+		if (level === 1 && prevLevel < 1) {
+			// Warning: informational only (never injects — a warning must not stall).
+			if (config.notifyOnDetection) {
+				ctx.ui.notify(`antiloop: warning — ${det.description}`, "warning");
+			}
+		} else if (level === 2) {
+			if (!state.steerDelivered) {
+				// Steer the break message before the next LLM call. The degenerate bash
+				// itself is blocked by the tool_call gate, so the model sees the block
+				// reason + the steer together and can still change approach.
+				if (ctx.signal !== undefined) {
+					deliverForceBreak(ctx, [det]);
+				} else if (prevLevel < 2 && config.notifyOnDetection) {
+					ctx.ui.notify(`antiloop: force break — ${det.description}`, "error");
+				}
+			} else if (isVerbatimRepeat([det])) {
+				// The model produced degenerate output AGAIN after the break message:
+				// count it; once the ignore limit is hit the run is cut for good.
+				state.ignoredSteerCount++;
+				if (state.ignoredSteerCount >= config.ignoredSteerLimit) {
+					hardStop(
+						ctx,
+						`antiloop: abort — degenerate output repeated ${state.ignoredSteerCount}× after the force break — run stopped; provide new instructions`,
+					);
+				}
+			}
+		} else if (level === 3) {
+			// abortThreshold configured and reached: stop the run BEFORE the degenerate
+			// tool calls can execute (ctx.abort kills the pending tool batch).
+			hardStop(ctx, `antiloop: abort — ${det.description} — run stopped; provide new instructions`);
+		}
+		updateStatus(ctx);
 	});
 
 	pi.on("input", async (event) => {
@@ -291,9 +364,30 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		return { action: "continue" };
 	});
 
+	/**
+	 * v1.6 — degenerate bash gate. A meltdown message whose command repeats one
+	 * word hundreds of times (the 46 KB "noguerol ×5145" SSH-wordlist brute
+	 * force) must NEVER execute: it is pure context burn at best, and a real
+	 * brute-force / destructive repetition at worst. message_end already
+	 * escalated it; here we block the actual call before it runs. The block
+	 * reason is fed back to the model as the tool error, so the next LLM call
+	 * sees why the command was refused and can change approach.
+	 */
+	pi.on("tool_call", async (event, ctx) => {
+		if (!config.enabled || !config.detectDegenerate || !config.blockDegenerateBash) return;
+		if (!isToolCallEventType("bash", event)) return;
+		const { findDegenerateRepetition, degenerateDescription } = await import("./detect.ts");
+		const hit = findDegenerateRepetition(event.input.command ?? "", config);
+		if (!hit) return;
+		return {
+			block: true,
+			reason: `[antiloop] blocked: ${degenerateDescription({ ...hit, where: "bash command" })} — this is stuck generation, not a real command. Do NOT retry it: stop and take one small, concrete step instead.`,
+		};
+	});
+
 	pi.on("turn_end", async (event, ctx) => {
 		if (!config.enabled) return;
-		const { detectLoops, detectTaskStreams, isVerbatimRepeat, nextLevel, resultFingerprint } = await import("./detect.ts");
+		const { detectLoops, detectTaskStreams, detectionTurnWeight, isVerbatimRepeat, nextLevel, resultFingerprint } = await import("./detect.ts");
 
 		const last = state.recentMessages[state.recentMessages.length - 1];
 		if (!last || last.turnIndex === state.lastDetectedTurnIndex) {
@@ -337,7 +431,9 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		}
 
 		// ---- detection: escalate ------------------------------------------
-		state.consecutiveDetections++;
+		// Degenerate turns count degenerateTurnWeight (default 2) points so a
+		// single intra-message meltdown already reaches the warning level.
+		state.consecutiveDetections += detectionTurnWeight(detections, config);
 		state.totalDetections++;
 		state.detections.push(...detections);
 		if (state.detections.length > config.maxHistoryEntries) {
