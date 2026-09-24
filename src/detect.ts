@@ -495,6 +495,28 @@ export function detectTaskStreams(
 	return streams;
 }
 
+// ---------------------------------------------------------------------------
+// Snapshot / read-only tools (v1.8).
+//
+// A coordinator closing N agents that already finished calls the snapshot tool
+// once per agent and gets the SAME serialized board every time (all settled).
+// Same args + same result looks exactly like a verbatim tool loop to the
+// detector, but re-reading a state snapshot is an idempotent read — the serial
+// close of finished work, not a stuck generation. Tools listed in
+// config.snapshotTools (default: trimegisto_harvest) are therefore exempt from
+// tool-loop and outcome detection. Any other status/poll tool can be added.
+// ---------------------------------------------------------------------------
+
+/** Set of tool names whose repeated identical reads must never count as a loop. */
+function snapshotToolSet(config: AntiloopConfig): Set<string> {
+	return new Set((config.snapshotTools ?? []).map((n) => n.trim()).filter(Boolean));
+}
+
+/** True when every call in the set is a snapshot/status read. */
+function allSnapshotCalls(calls: TrackedToolCall[] | undefined, snapshots: Set<string>): boolean {
+	return !!calls && calls.length > 0 && calls.every((c) => snapshots.has(c.name));
+}
+
 export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopDetection[] {
 	const out: LoopDetection[] = [];
 	const msgs = state.recentMessages;
@@ -543,6 +565,7 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 	// detections that only involve batch messages are suppressed too — the
 	// model is doing N different tasks of the same type, not looping.
 	const streams = detectTaskStreams(win, config);
+	const snapshots = snapshotToolSet(config);
 	const batchAt = new Set<number>();
 	win.forEach((m, idx) => {
 		const calls = m.toolCalls;
@@ -596,7 +619,10 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 		const lastCalls = last.toolCalls;
 		// A message whose calls are all task-stream tools is batch work — skip
 		// it entirely (the stream gate already proved the calls are distinct).
-		if (lastCalls && lastCalls.length && !batchAt.has(msgs.length - 1)) {
+		// Snapshot/status tools (trimegisto_harvest…) are also skipped: repeated
+		// identical reads of a settled board are the serial close of finished
+		// agents, not a loop.
+		if (lastCalls && lastCalls.length && !batchAt.has(msgs.length - 1) && !allSnapshotCalls(lastCalls, snapshots)) {
 			const matched: number[] = [];
 			for (let i = 0; i < win.length - 1; i++) {
 				const prev = win[i].toolCalls;
@@ -654,7 +680,9 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 			// produce the SAME OK outcome every call — they must never count. And
 			// batch messages must NOT be skipped here: a "bash ×N stream" with
 			// identical failures is exactly the no-progress loop to catch.
-			if (lc.result && isFailResult(lc.result)) {
+			// Snapshot/status reads are excluded outright: an identical harvest
+			// snapshot is a state read, not a repeated failing experiment.
+			if (lc.result && isFailResult(lc.result) && !snapshots.has(lc.name)) {
 				let matches = 0;
 				for (let i = 0; i < win.length - 1; i++) {
 					const m = win[i];
@@ -802,6 +830,7 @@ export function runSelfTest(): string[] {
 		detectTextLoops: true, notifyOnDetection: true, maxHistoryEntries: 100,
 		detectionWindow: 10, interactiveFooter: true, toggleShortcut: "esc+a",
 		detectTaskStreams: true, taskStreamMinCalls: 3, taskStreamTwinThreshold: 0.99,
+		snapshotTools: ["trimegisto_harvest"],
 		detectDegenerate: true, degenerateMinTokens: 50, degenerateMaxRun: 16,
 		degenerateMaxFreq: 60, degenerateMaxShare: 0.4, degenerateTurnWeight: 2, blockDegenerateBash: true,
 		detectBlockRepeats: true, blockMinTokens: 120, blockNgram: 5, blockMinRepeats: 3, blockRepeatShare: 0.85,
@@ -1051,6 +1080,33 @@ export function runSelfTest(): string[] {
 	const okDet = detectLoops(asState(okMsgs), tcfg);
 	out.push(`outcome identical OKs     → ${okDet.some((d) => d.type === "outcome") ? "outcome" : "silent"} (exp silent — success repeats ≠ loop) ${!okDet.some((d) => d.type === "outcome") ? "✅" : "❌"}`);
 	out.push(`isFailResult gate         → err| → ${isFailResult("err|boom") ? "fail" : "ok"}, rc32 → ${isFailResult("ok|rc32 denied") ? "fail" : "ok"}, rc0/ok → ${isFailResult("ok|rc 0 12 passed") ? "fail" : "ok"} (exp fail, fail, ok) ${isFailResult("err|boom") && isFailResult("ok|rc32 denied") && !isFailResult("ok|rc 0 12 passed") ? "✅" : "❌"}`);
+
+	// --- v1.8: snapshot/read-only tools are idempotent reads, not loops ---
+	// Regression (real session /srv 2026-09-23T21:35): a coordinator closed
+	// N agents that had ALREADY settled by calling trimegisto_harvest five times
+	// with `{}`; every call returned the SAME 2.3 KB cumulative snapshot (all
+	// agents done). Same args + same result ×5 → the tool detector force-broke
+	// the run. Re-reading a settled state board is the serial close of finished
+	// agents, not a stuck generation: with the snapshot exemption it is silent.
+	const harvestSnap = resultFingerprint(
+		[{
+			type: "text",
+			text:
+				"## Trimegisto harvest (instant snapshot)\n\n### ✅ t0a [Active] — done (101s)\nTask: Explora el sistema en busca de LM Studio y sus runtimes.\n\n```\n# Informe: LM Studio en el sistema\n...\n```\n*10 turns, ↑32825 ↓2429*\n\n_All agents settled._",
+		}],
+		false,
+	)!;
+	const harvestMsgs = [0, 1, 2, 3, 4].map(() =>
+		mk("", [{ name: "trimegisto_harvest", args: "{}", result: harvestSnap }]),
+	);
+	const snapDet = detectLoops(asState(harvestMsgs), tcfg);
+	out.push(`snapshot harvest ×5       → ${snapDet.length ? snapDet.map((d) => d.type).join(",") : "silent"} (exp silent — serial close of settled agents) ${snapDet.length === 0 ? "✅" : "❌"}`);
+
+	// Guard: the exemption is what silences it — the SAME payload with
+	// snapshotTools off is a genuine verbatim tool loop.
+	const noSnapCfg: AntiloopConfig = { ...tcfg, snapshotTools: [] };
+	const snapLoud = detectLoops(asState(harvestMsgs), noSnapCfg);
+	out.push(`snapshot off = loop       → ${snapLoud.some((d) => d.type === "tool") ? "tool" : "no"} (exp tool — normal tools still loop) ${snapLoud.some((d) => d.type === "tool") ? "✅" : "❌"}`);
 
 	return out;
 }

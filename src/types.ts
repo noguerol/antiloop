@@ -109,6 +109,18 @@ export interface AntiloopConfig {
 	detectTaskStreams: boolean;
 	taskStreamMinCalls: number;
 	taskStreamTwinThreshold: number;
+	/**
+	 * Read-only snapshot/status tools (default: ["trimegisto_harvest"]). These
+	 * return a view of changing state (a list of agents, a queue, a dashboard).
+	 * Calling one again with the SAME arguments is an idempotent read — most
+	 * strikingly when a coordinator closes N agents that already settled and the
+	 * serialized snapshot is byte-identical every time. That is the serial close
+	 * of finished agents, not a reasoning loop, so repeated calls to a snapshot
+	 * tool never count as a tool loop (nor as a no-progress outcome run). Names
+	 * are matched exactly against the tool name; add any other status/poll tool
+	 * here to keep antiloop quiet while it is read repeatedly.
+	 */
+	snapshotTools: string[];
 	detectToolLoops: boolean;
 	detectThinkingLoops: boolean;
 	detectTextLoops: boolean;

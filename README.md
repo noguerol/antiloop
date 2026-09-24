@@ -15,6 +15,7 @@
 - **Seven detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + near-identical arguments + same outcome — result-aware, so retries that make progress don't false-positive), thinking blocks, structural opening-phrase patterns, **degenerate repetition** (a single message/call stuck repeating one word hundreds of times — the `lorem ×5145` meltdown — caught at `message_end` with no repeated peer needed, and degenerate bash commands blocked before they execute), **block repetition** (ONE message replaying whole sentences/phrases — the narration loop: `Let me start by checking the environment…` ×5 — same `message_end` timing and strong turn weight), and **no-progress outcome runs** (the NFS `test A…QQQ` class: dozens of near-identical re-runs of the same experiment, every one ending in the *same failing outcome* — args mutate so tool-loop can't see it; the repeated failure signature can)
 - **Stays alive in long sessions** — tracked messages carry a monotonic sequence number, so trimming the sliding window can never make the dedupe guard skip later messages (a bug that silently blinded antiloop after ~15 tracked messages)
 - **Task-stream recognition (batch work)** — when another extension (e.g. `punched` appending lines to pi.md, or `plan` adding tasks) makes the model call the *same* tool many times with *different* content, antiloop recognizes it as N distinct tasks of one type and stays silent — no warning, no force break. A genuine loop (the *same* call repeated verbatim) is still caught
+- **Snapshot/read-only tool exemption** — a coordinator closing N agents that already finished calls `trimegisto_harvest` once per agent and gets the *same* settled board every time; identical reads of a status snapshot are an idempotent serial close, not a loop, so `snapshotTools` (configurable) is exempt from tool-loop and no-progress detection — real `bash` loops next to it are still caught
 - **Progressive intervention** — `warning` reminds the model to vary its approach; `force break` steers a real break message into the running agent before its next LLM call; `abort` stops the run entirely
 - **Configurable thresholds** — independent dials for similarity cutoff, warning/force-break/abort counts, detection window, and which strategies are on
 - **Sliding window** — only the last N messages are compared, so detection is O(N) in the window size, not in the full session
@@ -140,6 +141,9 @@ Grouped interactive menu showing the current value in each option:
 - **📋 task streams** — on/off — recognize that batch work and stay silent
 - **📋 stream min calls** — `2 / 3 / 4 / 5` — same-tool calls required before a batch is recognized (default 3)
 - **📋 twin threshold** — `99 / 95 / 90%` — calls more similar than this count as the *same task* repeated; one twin invalidates the batch and normal detection resumes (default 99%)
+
+**📡 Snapshot tools** — read-only status boards (trimegisto_harvest, …) read serially are not a loop
+- **📡 snapshot tools** — `trimegisto_harvest` / off — repeated identical reads of a settled board stay silent all the way through (default on; add any other status/poll tool in `antiloop.json`)
 
 **🔍 Detectors**
 - **📝 text** — on/off — detect repeated text messages
@@ -296,6 +300,27 @@ Tunables: `detectTaskStreams` (master switch), `taskStreamMinCalls` (batch
 size needed before recognition), `taskStreamTwinThreshold` (how similar args
 must be to count as *the same task* — lower it to treat near-duplicate
 entries as loops again).
+
+### Snapshot tools: the serial close of settled agents ≠ a loop
+
+A coordinator that closes N agents which have already finished calls the
+snapshot tool once per agent. When the agents are all settled, every one of
+those calls returns the **same** serialized board — same arguments (`{}`),
+same result. To the tool detector that is indistinguishable from a verbatim
+loop: `same args + same outcome` repeated N times, so it force-broke a run
+that was simply collecting finished results.
+
+Re-reading a state snapshot is an *idempotent read*, not a stuck generation,
+so tools listed in `snapshotTools` (default `["trimegisto_harvest"]`) are
+exempt from tool-loop **and** no-progress outcome detection. The exemption is
+deliberately narrow:
+
+- it only applies when *every* call in the message is a snapshot tool — a
+  real `bash` loop re-run alongside a harvest is still flagged;
+- it is name-based and configurable, so `antiloop.json` can list any other
+  status/poll tool (`"snapshotTools": ["trimegisto_harvest", "my_status"]`);
+- clearing it (`"snapshotTools": []` or **📡 off**) restores normal detection,
+  where the very same 5× harvest payload is a genuine verbatim tool loop.
 
 ### Degenerate repetition: ONE message stuck on a word ≠ a reasoning loop
 
@@ -503,6 +528,7 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 | `detectTaskStreams` | `true` | Recognize homogeneous batch work (same tool called with distinct content — e.g. punched/plan/obsidian extensions) and stay silent; see [task streams](#task-streams-n-tasks-of-one-type--a-loop) |
 | `taskStreamMinCalls` | `3` | Same-tool calls required inside the window before a task stream is recognized |
 | `taskStreamTwinThreshold` | `0.99` | Arguments this similar (or identical) count as *the same task* — a twin invalidates the stream and re-enables normal loop detection |
+| `snapshotTools` | `["trimegisto_harvest"]` | Read-only snapshot/status tools: repeated identical reads (the serial close of N settled agents) never count as a tool loop or no-progress run. Add any other status/poll tool by name |
 | `detectTextLoops` | `true` | Detect full-text repetition |
 | `detectToolLoops` | `true` | Detect tool-call sequence + argument repetition |
 | `detectThinkingLoops` | `true` | Detect repeated thinking/reasoning content |

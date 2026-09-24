@@ -36,6 +36,7 @@ export const DEFAULT_CONFIG: AntiloopConfig = {
 	detectTaskStreams: true,
 	taskStreamMinCalls: 3,
 	taskStreamTwinThreshold: 0.99,
+	snapshotTools: ["trimegisto_harvest"],
 	detectToolLoops: true,
 	detectThinkingLoops: true,
 	detectTextLoops: true,

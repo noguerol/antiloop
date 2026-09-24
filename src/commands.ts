@@ -62,6 +62,7 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		`  block repeats: ${yn(rt.config.detectBlockRepeats)} (≥ ${(rt.config.blockRepeatShare * 100).toFixed(0)}% of ≥ ${rt.config.blockMinTokens} tokens replay ${rt.config.blockNgram}-grams ×${rt.config.blockMinRepeats}+)`,
 		`  outcome: same failing result ≥ ${rt.config.outcomeMinRepeats} attempts (args ≥ ${(rt.config.outcomeArgSimilarity * 100).toFixed(0)}% sim, sig ≥ ${(rt.config.outcomeSigThreshold * 100).toFixed(0)}%)`,
 		`  task streams: ${yn(rt.config.detectTaskStreams)} (min ${rt.config.taskStreamMinCalls} calls, twins ≥ ${(rt.config.taskStreamTwinThreshold * 100).toFixed(0)}%)`,
+		`  snapshot tools: ${rt.config.snapshotTools?.length ? rt.config.snapshotTools.join(", ") : "off"} (repeated reads are not a loop)`,
 		"",
 		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)} · block ${yn(rt.config.detectBlockRepeats)} · outcome ${yn(rt.config.detectOutcomeLoops)}`,
 		`footer: interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
@@ -105,6 +106,7 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "streams" as const, label: `📋 task streams: ${yn(c.detectTaskStreams)}`, description: "batch work (punched_log / plan_manager / …) is not a loop" },
 		{ value: "streamMin" as const, label: `📋 stream min calls: ${c.taskStreamMinCalls}`, description: "calls of the same tool before a batch is recognized" },
 		{ value: "streamTwin" as const, label: `📋 twin threshold: ${(c.taskStreamTwinThreshold * 100).toFixed(0)}%`, description: "calls more similar than this = the same task repeated, not a batch" },
+		{ value: "snapshot" as const, label: `📡 snapshot tools: ${c.snapshotTools?.length ? c.snapshotTools.join(", ") : "off"}`, description: "read-only status tools (trimegisto_harvest): re-reading settled agents serially is not a loop" },
 		// ── 🔍 Detectors ────────────────────────────────────────────
 		{ value: "text" as const, label: `📝 text: ${yn(c.detectTextLoops)}`, description: "detect repeated text messages" },
 		{ value: "tool" as const, label: `🔧 tools: ${yn(c.detectToolLoops)}`, description: "detect repeated tool calls" },
@@ -275,6 +277,18 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 				{ value: 0.9, label: "⚡ 90% (more aggressive loop detection)" },
 			]);
 			if (v !== undefined) { c.taskStreamTwinThreshold = v; saveConfig(c); ctx.ui.notify(`twin threshold: ${(v * 100).toFixed(0)}%`, "info"); }
+			break;
+		}
+		case "snapshot": {
+			const v = await selectFrom(ctx, "📡 snapshot / read-only tools (repeated identical reads are never a loop)", [
+				{ value: "default" as const, label: "🎯 trimegisto_harvest (default)", description: "serial close of settled agents: same args + same snapshot ×N stays silent" },
+				{ value: "off" as const, label: "🚫 off", description: "treat every tool identically (harvest can loop-flag again)" },
+			]);
+			if (v !== undefined) {
+				c.snapshotTools = v === "off" ? [] : ["trimegisto_harvest"];
+				saveConfig(c);
+				ctx.ui.notify(`snapshot tools: ${c.snapshotTools.length ? c.snapshotTools.join(", ") : "off"}`, "info");
+			}
 			break;
 		}
 		case "ignoredBreak": {
