@@ -34,8 +34,30 @@ export interface AntiloopConfig {
 	degenerateMaxShare: number;
 	/** How many consecutive-detection points ONE degenerate turn adds (2 = warn on first sight). */
 	degenerateTurnWeight: number;
-	/** Block a bash tool call whose command shows degenerate repetition BEFORE it executes. */
+	/** Block a bash tool call whose command shows degenerate OR block repetition BEFORE it executes. */
 	blockDegenerateBash: boolean;
+	/**
+	 * Intra-message BLOCK repetition (v1.7): the "narration loop" class where ONE
+	 * assistant message keeps replaying the same sentences/phrases (the real S0
+	 * coding session: ~5 near-verbatim cycles of "Let me start by checking the
+	 * environment…" inside a SINGLE generation, which every cross-message detector
+	 * misses because it produced only one message and the degenerate detector only
+	 * watches for ONE word repeated hundreds of times). A sliding window of
+	 * blockNgram-word n-grams over the normalized payload is built; when at least
+	 * blockRepeatShare of those positions recur, one n-gram appears at least
+	 * blockMinRepeats times and the payload has at least blockMinTokens words, the
+	 * message is a replay. Fires at message_end (before the message's tools run)
+	 * with the same strong turn weight as the degenerate detector.
+	 */
+	detectBlockRepeats: boolean;
+	/** Minimum normalized words in a payload before it is scanned for block repetition. */
+	blockMinTokens: number;
+	/** Word window of the n-grams whose recurrence is measured (default 5). */
+	blockNgram: number;
+	/** The MOST repeated n-gram must occur at least this many times to flag. */
+	blockMinRepeats: number;
+	/** Share of n-gram positions that must recur for the payload to count as a replay. */
+	blockRepeatShare: number;
 	/**
 	 * No-progress outcome runs (v1.6.1): a model that keeps re-running the SAME
 	 * experiment with cosmetic mutations (labels/permutations) while the outcome
@@ -106,7 +128,7 @@ export interface AntiloopConfig {
 	toggleShortcut: string;
 }
 
-export type LoopKind = "text" | "tool" | "thinking" | "structural" | "degenerate" | "outcome";
+export type LoopKind = "text" | "tool" | "thinking" | "structural" | "degenerate" | "block" | "outcome";
 
 export interface LoopDetection {
 	type: LoopKind;

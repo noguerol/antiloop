@@ -185,12 +185,124 @@ export function degenerateDescription(hit: DegenerateHit): string {
 	return `${hit.where}: degenerate repetition — "${hit.token}" ×${hit.freq} (${share}% of ${hit.total} tokens, longest run ${hit.maxRun})`;
 }
 
+// ---------------------------------------------------------------------------
+// Intra-message BLOCK repetition (v1.7).
+//
+// The "narration loop" class (verified against a real coding session: ONE
+// assistant message replaying ~5 near-verbatim cycles of "Let me start by
+// checking the environment and the current state of the repository… / I'll run
+// several independent checks in parallel. / Let me begin the S0 development…").
+// Every pre-existing detector stayed silent: text/tool/thinking/structural all
+// compare ACROSS messages (the model produced one message, no peer), and the
+// degenerate detector only watches ONE word repeated hundreds of times, not a
+// whole sentence/paragraph replayed. The signal here is phrase-level: a sliding
+// window of blockNgram-word n-grams over the normalized payload; if almost ALL
+// of those n-grams recur and the most frequent one recurs ≥ blockMinRepeats
+// times, the generation is replaying itself instead of advancing.
+//
+// Deliberately conservative: only a payload where ≥ blockRepeatShare (default
+// 85%) of 5-gram positions repeat qualifies. Ordinary prose — even long,
+// structured docs — sits far below (README/pi.md paragraphs: ≤ 0.11), while
+// 3+ replays of a narration block reach 0.98–1.0. Repeat-linked code/log lines
+// that share a template are NOT flagged because their n-grams carry the varying
+// digits and differ.
+// ---------------------------------------------------------------------------
+
+/** Recursive n-gram coverage of one payload. */
+export interface BlockRepeatInfo {
+	/** Recurring n-gram positions / total n-gram positions (0..1). */
+	ratio: number;
+	/** Occurrences of the MOST repeated n-gram. */
+	repeats: number;
+	/** Total normalized words in the payload. */
+	tokens: number;
+	/** The n used (words per window). */
+	ngram: number;
+	/** The most repeated n-gram, for the description. */
+	sample: string;
+}
+
+export interface BlockRepeatHit extends BlockRepeatInfo {
+	where: string;
+}
+
+/**
+ * Detect phrase/block-level self-repetition inside ONE payload. Returns the
+ * coverage ratio with the most repeated n-gram, or undefined for normal text.
+ *
+ * Reads the payload as a stream of lowercase alphanumeric words (code symbols
+ * and punctuation are separators, so stored-JSON escaping cannot glue tokens).
+ * Coverage counts an n-gram position as repeated when the SAME n-word sequence
+ * (digits included, so templated lines with varying numbers do not count)
+ * occurs somewhere else in the payload.
+ */
+export function findRepetitiveBlock(text: string, config: AntiloopConfig): BlockRepeatInfo | undefined {
+	const words = String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu);
+	if (!words) return undefined;
+	const total = words.length;
+	if (total < config.blockMinTokens) return undefined;
+	const n = Math.max(2, config.blockNgram);
+	const minRepeats = Math.max(2, config.blockMinRepeats);
+	if (total < n * minRepeats) return undefined;
+
+	const counts = new Map<string, number>();
+	const grams: string[] = [];
+	for (let i = 0; i + n <= total; i++) {
+		const g = words.slice(i, i + n).join(" ");
+		grams.push(g);
+		counts.set(g, (counts.get(g) ?? 0) + 1);
+	}
+	if (!grams.length) return undefined;
+
+	let covered = 0;
+	let topKey = "";
+	let top = 0;
+	for (const g of grams) {
+		const c = counts.get(g)!;
+		if (c > top) {
+			top = c;
+			topKey = g;
+		}
+		if (c >= 2) covered++;
+	}
+	// At least one n-word phrase must recur blockMinRepeats times (a single
+	// echo is a restatement, not a replay) and the recurrence must dominate.
+	if (top < minRepeats) return undefined;
+	const ratio = covered / grams.length;
+	if (ratio < config.blockRepeatShare) return undefined;
+	return { ratio, repeats: top, tokens: total, ngram: n, sample: topKey };
+}
+
+/** Scan one assistant message (text + each tool-call argument) for a replay. */
+export function scanMessageBlock(
+	content: string,
+	toolCalls: TrackedToolCall[] | undefined,
+	config: AntiloopConfig,
+): BlockRepeatHit | undefined {
+	if (!config.detectBlockRepeats) return undefined;
+	if (content && content.length) {
+		const b = findRepetitiveBlock(content, config);
+		if (b) return { ...b, where: "message text" };
+	}
+	for (const tc of toolCalls ?? []) {
+		if (!tc.args) continue;
+		const b = findRepetitiveBlock(tc.args, config);
+		if (b) return { ...b, where: tc.name === "bash" ? "bash command" : `args(${tc.name})` };
+	}
+	return undefined;
+}
+
+export function blockRepeatDescription(hit: BlockRepeatHit): string {
+	const pct = Math.round(hit.ratio * 100);
+	return `${hit.where}: block repetition — ${pct}% of ${hit.tokens} tokens replay repeated ${hit.ngram}-word phrases ("${hit.sample}" ×${hit.repeats})`;
+}
+
 /** Consecutive-detection weight of a detection turn. The strong
  * self-contained signals (degenerate meltdown, proven no-progress outcome run)
  * add degenerateTurnWeight (default 2) points so the FIRST one already reaches
  * the warning level and escalation is fast on repeat. */
 export function detectionTurnWeight(detections: LoopDetection[], config: AntiloopConfig): number {
-	const strong = detections.some((d) => d.type === "degenerate" || d.type === "outcome");
+	const strong = detections.some((d) => d.type === "degenerate" || d.type === "block" || d.type === "outcome");
 	return strong ? Math.max(1, config.degenerateTurnWeight) : 1;
 }
 
@@ -391,9 +503,10 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 	const win = msgs.slice(start);
 	const now = Date.now();
 
-	// Intra-message degenerate repetition fires on a SINGLE pathological message
-	// (no peer needed) and is independent of the task-stream batch gate: a
-	// meltdown is a meltdown even mid-batch.
+	// Intra-message repetition fires on a SINGLE pathological message (no peer
+	// needed) and is independent of the task-stream batch gate: a meltdown is a
+	// meltdown even mid-batch. Two flavors: degenerate (one word ×hundreds) and
+	// block (whole sentences/phrases replayed — the narration-loop class).
 	if (config.detectDegenerate) {
 		const last = win[win.length - 1];
 		const hit = scanMessageDegenerate(last.content, last.toolCalls, config);
@@ -403,6 +516,22 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 				similarity: 1,
 				messageIndices: [msgs.length - 1],
 				description: degenerateDescription(hit),
+				timestamp: now,
+			});
+		}
+	}
+
+	if (config.detectBlockRepeats) {
+		const last = win[win.length - 1];
+		const hit = scanMessageBlock(last.content, last.toolCalls, config);
+		if (hit) {
+			out.push({
+				type: "block",
+				// 0.99 => isVerbatimRepeat(): after a force break, a replayed block
+				// is the model ignoring the break and escalates to the hard stop.
+				similarity: 0.99,
+				messageIndices: [msgs.length - 1],
+				description: blockRepeatDescription(hit),
 				timestamp: now,
 			});
 		}
@@ -675,6 +804,7 @@ export function runSelfTest(): string[] {
 		detectTaskStreams: true, taskStreamMinCalls: 3, taskStreamTwinThreshold: 0.99,
 		detectDegenerate: true, degenerateMinTokens: 50, degenerateMaxRun: 16,
 		degenerateMaxFreq: 60, degenerateMaxShare: 0.4, degenerateTurnWeight: 2, blockDegenerateBash: true,
+		detectBlockRepeats: true, blockMinTokens: 120, blockNgram: 5, blockMinRepeats: 3, blockRepeatShare: 0.85,
 		detectOutcomeLoops: true, outcomeMinRepeats: 8, outcomeArgSimilarity: 0.85, outcomeSigThreshold: 0.7,
 	};
 	const asState = (recentMessages: TrackedMessage[]): AntiloopState =>
@@ -781,6 +911,56 @@ export function runSelfTest(): string[] {
 	const wDeg = detectionTurnWeight(mDet, tcfg);
 	const wTxt = detectionTurnWeight(dl("text", 0.8), tcfg);
 	out.push(`degenerate turn weight    → degenerate ${wDeg}, text ${wTxt} (exp 2, 1) ${wDeg === 2 && wTxt === 1 ? "✅" : "❌"}`);
+
+	// --- v1.7: intra-message BLOCK repetition (narration loops) ---
+	// Regression: a real coding session where ONE assistant message replayed the
+	// same ~5 sentences in a loop ("Let me start by checking the environment…" /
+	// "I'll run several independent checks in parallel." / "Let me begin the S0
+	// development…"). Cross-message text/tool/thinking detectors need a peer and
+	// stayed silent; the degenerate scan only watches a single word. The block
+	// detector must fire on the message itself.
+	const NARRV = [
+		"Let me start by checking the environment and the current state of the repository, then set up a plan for the S0 slice and begin building.",
+		"I'll run several independent checks in parallel.",
+		"Let me begin the S0 development. First, reconnaissance of the environment and current repo state.",
+		"Let me check what's available in the environment (node, package managers, network, postgres) and the current repo state, then set up the S0 plan and start building the monorepo scaffold.",
+		"I'll run a batch of independent environment checks first.",
+	];
+	const cycles = (k: number): string => {
+		let s = "";
+		for (let i = 0; i < k; i++) for (const v of NARRV) s += v + "\n\n";
+		return s;
+	};
+	const s0Det = detectLoops(asState([mk(cycles(5))]), tcfg);
+	const s0Hit = s0Det.find((d) => d.type === "block");
+	out.push(`block S0 narration loop  → ${s0Hit ? `block (${s0Hit.description})` : "no"} (exp block — was the miss) ${s0Hit ? "✅" : "❌"}`);
+	out.push(`block turn weight        → ${detectionTurnWeight(s0Det, tcfg)} (exp 2 — warn on first sight) ${detectionTurnWeight(s0Det, tcfg) === 2 ? "✅" : "❌"}`);
+	out.push(`block post-steer = ignored→ ${isVerbatimRepeat(s0Det) ? "yes" : "no"} (exp yes — replayed block after the break) ${isVerbatimRepeat(s0Det) ? "✅" : "❌"}`);
+
+	// 3 replay cycles still flag; a single restatement (2 cycles, top-gram ×2)
+	// does not — one echo is a summary, not stuck generation.
+	const c3 = findRepetitiveBlock(cycles(3), tcfg);
+	const c2 = findRepetitiveBlock(cycles(2), tcfg);
+	out.push(`block 3 cycles / 2 cycles→ ${c3 ? `flag (${Math.round(c3.ratio * 100)}%)` : "no"} / ${c2 ? "flag" : "no"} (exp flag / no — needs ≥3 repeats) ${c3 && !c2 ? "✅" : "❌"}`);
+
+	// Ordinary prose and templated (but evolving) payloads must stay silent:
+	// long docs score ≤ 0.11 coverage; templated logs/code carry varying digits
+	// so their 5-grams differ.
+	const prose =
+		"The extension watches every assistant message and tool call to decide whether the model is making progress. " +
+		"It stores a short window of recent turns, fingerprints tool results and compares them with earlier attempts. " +
+		"When a pattern repeats it escalates from a quiet warning to a forced change of approach and finally aborts. " +
+		"Configuration lives in a small json file next to the agent directory and every threshold can be tuned at runtime. " +
+		"The default values were chosen against real sessions so ordinary work never triggers a false positive. " +
+		"Detectors are independent: disabling one leaves the others active and the footer keeps the user informed. " +
+		"A clean turn cools the counter down so a recovered model is given room to finish the task. " +
+		"Everything is written in plain typescript with no runtime dependencies beyond the host package. " +
+		"New strategies should be measured against the recorded payloads before they are enabled by default. " +
+		"The goal is simple: catch a stuck model early and keep the context useful for the real work.";
+	const logLines = [...Array(30)].map((_, i) => `2026-09-24T10:${String(i).padStart(2, "0")}:00Z INFO worker ${i} processed job ${1000 + i} in ${i * 3}ms status ok`).join("\n");
+	const proseHit = findRepetitiveBlock(prose, tcfg);
+	const logHit = findRepetitiveBlock(logLines, tcfg);
+	out.push(`block legit prose/logs   → ${proseHit || logHit ? "flag" : "ok"} (exp ok) ${!proseHit && !logHit ? "✅" : "❌"}`);
 
 	// --- v1.6.1: no-progress outcome runs (mutated re-runs, same outcome) ---
 	// Regression: the NFS session — ~90 mutated re-runs of the SAME experiment

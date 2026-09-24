@@ -21,3 +21,5 @@ pi.md
 pi.md.local
 .punched-memory.json
 .punched-memory/
+# t-plan: private runtime state — never commit or publish
+plan_*.md

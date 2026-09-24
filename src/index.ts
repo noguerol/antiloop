@@ -24,6 +24,13 @@
  * hook (blockDegenerateBash). One degenerate turn counts degenerateTurnWeight
  * (2) consecutive points: warning on first sight, force-break steer on the
  * second consecutive meltdown, hard stop shortly after if it keeps repeating.
+ *
+ * v1.7 adds the intra-message BLOCK detector for the narration-loop class:
+ * ONE message that replays whole sentences/phrases ("Let me start by checking
+ * the environment…" ×5), which every cross-message detector misses because
+ * there is no peer message and the degenerate scan only watches single words.
+ * Same message_end timing and strong turn weight; the bash gate refuses a
+ * command that is itself a replayed block.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -285,29 +292,55 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 			state.recentMessages = state.recentMessages.slice(-(config.detectionWindow + 5));
 		}
 
-		// v1.6 — degenerate meltdowns are handled HERE, at message_end, because
-		// turn_end only fires after tool execution (too late to stop the 46 KB
-		// "lorem ×5000" bash from running) and an aborted generation may never
-		// reach turn_end at all. The signal is self-contained (one pathological
-		// payload, no peer message) so the full escalation ladder runs right now;
-		// the turn-guard makes the later turn_end pass skip this message and no
-		// detection is double-counted.
-		if (!config.detectDegenerate) return;
-		const { scanMessageDegenerate, degenerateDescription, nextLevel, isVerbatimRepeat } = await import("./detect.ts");
-		const hit = scanMessageDegenerate(content, toolCalls, config);
-		if (!hit) return;
+		// v1.6/v1.7 — intra-message repetition is handled HERE, at message_end,
+		// because turn_end only fires after tool execution (too late to stop the
+		// 46 KB "lorem ×5000" bash from running) and an aborted generation may
+		// never reach turn_end at all. The signal is self-contained (one
+		// pathological payload, no peer message) so the full escalation ladder runs
+		// right now; the turn-guard makes the later turn_end pass skip this message
+		// and no detection is double-counted. Two flavors: degenerate (one word
+		// ×hundreds) and block (whole sentences/phrases replayed — the narration
+		// loop class where every cross-message detector is blind).
+		if (!config.detectDegenerate && !config.detectBlockRepeats) return;
+		const {
+			scanMessageDegenerate,
+			degenerateDescription,
+			scanMessageBlock,
+			blockRepeatDescription,
+			nextLevel,
+			isVerbatimRepeat,
+		} = await import("./detect.ts");
+		let det: LoopDetection | undefined;
+		if (config.detectDegenerate) {
+			const degHit = scanMessageDegenerate(content, toolCalls, config);
+			if (degHit) {
+				det = {
+					type: "degenerate",
+					similarity: 1,
+					messageIndices: [state.recentMessages.length - 1],
+					description: degenerateDescription(degHit),
+					timestamp: Date.now(),
+				};
+			}
+		}
+		if (!det && config.detectBlockRepeats) {
+			const blkHit = scanMessageBlock(content, toolCalls, config);
+			if (blkHit) {
+				det = {
+					type: "block",
+					similarity: 0.99,
+					messageIndices: [state.recentMessages.length - 1],
+					description: blockRepeatDescription(blkHit),
+					timestamp: Date.now(),
+				};
+			}
+		}
+		if (!det) return;
 		const tracked = state.recentMessages[state.recentMessages.length - 1];
 		if (tracked) state.lastDetectedTurnIndex = tracked.turnIndex;
 		const prevLevel = state.currentLevel;
 		state.consecutiveDetections += Math.max(1, config.degenerateTurnWeight);
 		state.totalDetections++;
-		const det: LoopDetection = {
-			type: "degenerate",
-			similarity: 1,
-			messageIndices: [state.recentMessages.length - 1],
-			description: degenerateDescription(hit),
-			timestamp: Date.now(),
-		};
 		state.detections.push(det);
 		if (state.detections.length > config.maxHistoryEntries) {
 			state.detections = state.detections.slice(-config.maxHistoryEntries);
@@ -331,13 +364,13 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 					ctx.ui.notify(`antiloop: force break — ${det.description}`, "error");
 				}
 			} else if (isVerbatimRepeat([det])) {
-				// The model produced degenerate output AGAIN after the break message:
-				// count it; once the ignore limit is hit the run is cut for good.
+				// The model produced the same intra-message repetition AGAIN after the
+				// break message: count it; once the ignore limit is hit, cut the run.
 				state.ignoredSteerCount++;
 				if (state.ignoredSteerCount >= config.ignoredSteerLimit) {
 					hardStop(
 						ctx,
-						`antiloop: abort — degenerate output repeated ${state.ignoredSteerCount}× after the force break — run stopped; provide new instructions`,
+						`antiloop: abort — repetitive output repeated ${state.ignoredSteerCount}× after the force break — run stopped; provide new instructions`,
 					);
 				}
 			}
@@ -379,15 +412,28 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	 * sees why the command was refused and can change approach.
 	 */
 	pi.on("tool_call", async (event, ctx) => {
-		if (!config.enabled || !config.detectDegenerate || !config.blockDegenerateBash) return;
+		if (!config.enabled || !config.blockDegenerateBash) return;
 		if (!isToolCallEventType("bash", event)) return;
-		const { findDegenerateRepetition, degenerateDescription } = await import("./detect.ts");
-		const hit = findDegenerateRepetition(event.input.command ?? "", config);
-		if (!hit) return;
-		return {
-			block: true,
-			reason: `[antiloop] blocked: ${degenerateDescription({ ...hit, where: "bash command" })} — this is stuck generation, not a real command. Do NOT retry it: stop and take one small, concrete step instead.`,
-		};
+		const command = event.input.command ?? "";
+		const { findDegenerateRepetition, findRepetitiveBlock, degenerateDescription, blockRepeatDescription } = await import("./detect.ts");
+		if (config.detectDegenerate) {
+			const hit = findDegenerateRepetition(command, config);
+			if (hit) {
+				return {
+					block: true,
+					reason: `[antiloop] blocked: ${degenerateDescription({ ...hit, where: "bash command" })} — this is stuck generation, not a real command. Do NOT retry it: stop and take one small, concrete step instead.`,
+				};
+			}
+		}
+		if (config.detectBlockRepeats) {
+			const blk = findRepetitiveBlock(command, config);
+			if (blk) {
+				return {
+					block: true,
+					reason: `[antiloop] blocked: ${blockRepeatDescription({ ...blk, where: "bash command" })} — this is stuck generation, not a real command. Do NOT retry it: stop and take one small, concrete step instead.`,
+				};
+			}
+		}
 	});
 
 	pi.on("turn_end", async (event, ctx) => {

@@ -59,10 +59,11 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		`  tool sim: ${(rt.config.toolSimilarityThreshold * 100).toFixed(0)}%  tool repeat: ${rt.config.minToolRepeatCount}+ prior`,
 		`  result sim: ${(rt.config.resultSimilarityThreshold * 100).toFixed(0)}%  (same cmd + diff outcome = no loop)`,
 		`  degenerate: run ≥ ${rt.config.degenerateMaxRun} same word · freq ≥ ${rt.config.degenerateMaxFreq} @ ${(rt.config.degenerateMaxShare * 100).toFixed(0)}% (≥ ${rt.config.degenerateMinTokens} tokens) · weight ${rt.config.degenerateTurnWeight} · block bash ${yn(rt.config.blockDegenerateBash)}`,
+		`  block repeats: ${yn(rt.config.detectBlockRepeats)} (≥ ${(rt.config.blockRepeatShare * 100).toFixed(0)}% of ≥ ${rt.config.blockMinTokens} tokens replay ${rt.config.blockNgram}-grams ×${rt.config.blockMinRepeats}+)`,
 		`  outcome: same failing result ≥ ${rt.config.outcomeMinRepeats} attempts (args ≥ ${(rt.config.outcomeArgSimilarity * 100).toFixed(0)}% sim, sig ≥ ${(rt.config.outcomeSigThreshold * 100).toFixed(0)}%)`,
 		`  task streams: ${yn(rt.config.detectTaskStreams)} (min ${rt.config.taskStreamMinCalls} calls, twins ≥ ${(rt.config.taskStreamTwinThreshold * 100).toFixed(0)}%)`,
 		"",
-		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)} · outcome ${yn(rt.config.detectOutcomeLoops)}`,
+		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)} · block ${yn(rt.config.detectBlockRepeats)} · outcome ${yn(rt.config.detectOutcomeLoops)}`,
 		`footer: interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
 	];
 	if (rt.state.activeTaskStreams.length) {
@@ -95,7 +96,9 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "resultSim" as const, label: `🧾 result similarity: ${(c.resultSimilarityThreshold * 100).toFixed(0)}%`, description: "same command + different result = progress, not a loop" },
 		// ── 🌀 Degenerate (intra-message meltdown) ───────────────────────
 		{ value: "degRun" as const, label: `🌀 degenerate run: ≥ ${c.degenerateMaxRun}`, description: "identical words in a row inside ONE message/call before it counts as stuck generation (lorem ×5145 class)" },
-		{ value: "degBlock" as const, label: `⛔ block degenerate bash: ${yn(c.blockDegenerateBash)}`, description: "stop a degenerate command before it executes (default on)" },
+		{ value: "blk" as const, label: `🔁 block repetition: ${yn(c.detectBlockRepeats)}`, description: "ONE message replaying whole sentences/phrases (the narration loop: 'Let me start by checking…' ×5)" },
+		{ value: "blkShare" as const, label: `🔁 block share: ≥ ${(c.blockRepeatShare * 100).toFixed(0)}%`, description: "share of replayed 5-word phrases in one message before it counts as a replay" },
+		{ value: "degBlock" as const, label: `⛔ block repetitive bash: ${yn(c.blockDegenerateBash)}`, description: "stop a degenerate or replayed command before it executes (default on)" },
 		// ── 📉 Outcome (no-progress) ────────────────────────────────
 		{ value: "outcomeMin" as const, label: `📉 no-progress after: ${c.outcomeMinRepeats}`, description: "same failing outcome repeated this many times (mutated args ≥ 85% similar) before flagging — the NFS test-A…QQQ class" },
 		// ── 📋 Task streams ─────────────────────────────────────────
@@ -227,9 +230,21 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 			if (v !== undefined) { c.degenerateMaxRun = v; saveConfig(c); ctx.ui.notify(`degenerate run: ≥ ${v}`, "info"); }
 			break;
 		}
+		case "blk":
+			c.detectBlockRepeats = !c.detectBlockRepeats; saveConfig(c);
+			ctx.ui.notify(`block repetition: ${yn(c.detectBlockRepeats)}`, "info"); break;
+		case "blkShare": {
+			const v = await selectFrom(ctx, "🔁 block repetition share (replayed 5-gram positions in ONE message)", [
+				{ value: 0.7, label: "⚡ 70% (sensitive)" },
+				{ value: 0.85, label: "🎯 85% (default)" },
+				{ value: 0.95, label: "🐢 95% (only near-total replays)" },
+			]);
+			if (v !== undefined) { c.blockRepeatShare = v; saveConfig(c); ctx.ui.notify(`block share: ${(v * 100).toFixed(0)}%`, "info"); }
+			break;
+		}
 		case "degBlock":
 			c.blockDegenerateBash = !c.blockDegenerateBash; saveConfig(c);
-			ctx.ui.notify(`block degenerate bash: ${yn(c.blockDegenerateBash)}`, "info"); break;
+			ctx.ui.notify(`block repetitive bash: ${yn(c.blockDegenerateBash)}`, "info"); break;
 		case "outcomeMin": {
 			const v = await selectFrom(ctx, "📉 no-progress threshold (same failing outcome, near-identical args)", [
 				{ value: 4, label: "⚡ 4 (sensitive — long experiment series get cut early)" },
