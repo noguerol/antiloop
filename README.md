@@ -261,6 +261,7 @@ If the same command produced a *different* outcome, the pair is progress:
 
 Results only veto; they never trigger on their own, and calls without a
 captured result fall back to argument matching alone.
+```
 
 ### Task streams: N tasks of one type ≠ a loop
 
@@ -424,7 +425,6 @@ real session this fires at `test MM` (warn) → `NN` (steer) → `PP` (abort) �
 
 Tunables: `detectOutcomeLoops`, `outcomeMinRepeats` (lower = earlier cutoff),
 `outcomeArgSimilarity`, `outcomeSigThreshold`.
-```
 
 ### Sliding window
 
