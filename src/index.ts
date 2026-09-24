@@ -404,7 +404,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 
 	/**
 	 * v1.6 — degenerate bash gate. A meltdown message whose command repeats one
-	 * word hundreds of times (the 46 KB "lorem ×5145" SSH-wordlist brute
+	 * word hundreds of times (the 46 KB "lorem ×5145" argument-wordlist brute
 	 * force) must NEVER execute: it is pure context burn at best, and a real
 	 * brute-force / destructive repetition at worst. message_end already
 	 * escalated it; here we block the actual call before it runs. The block

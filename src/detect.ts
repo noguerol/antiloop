@@ -37,9 +37,9 @@ function opening(text: string, n = 10): string {
 // ---------------------------------------------------------------------------
 // Intra-message degenerate repetition (v1.6).
 //
-// The "lorem ×5145" class (verified against a real session — /srv
-// 2026-09-09T15-43: ONE 46 KB bash call whose SSH username list repeats a
-// single word 5145 times, a run of 5140 — 99% of the payload). A model whose
+// The "lorem ×5145" class (verified against a real session: ONE 46 KB bash
+// call whose argument list repeats a single word 5145 times, a run of 5140 —
+// 99% of the payload). A model whose
 // decoder anchors on a token stops producing NEW output: it repeats the same
 // word hundreds of times INSIDE one message or tool call. The cross-message
 // detectors (text / tool / thinking / structural) all need >= 2 similar
@@ -400,7 +400,7 @@ function failSig(fp: string): string | undefined {
 /** Same-FAILURE comparison for the outcome detector. Prefers the embedded error
  * signatures (they repeat across attempts of the same failure) with digits
  * stripped — timestamps, PIDs and rc values are noise; the target words that
- * legitimately vary between attempts (data-a vs data-b) survive but the
+ * legitimately vary between attempts (e.g. distinct mount targets) survive but the
  * threshold is looser than the veto threshold on purpose. Falls back to the
  * full fingerprints when no signature is present. */
 function sameFailure(a: string, b: string, threshold: number): boolean {
@@ -648,8 +648,8 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 	// -------------------------------------------------------------------
 	// No-progress outcome runs (v1.6.1).
 	//
-	// The NFS-test session (/srv 2026-09-09, rows 95–249): ~90 mutated
-	// re-runs of the SAME experiment (sshpass+sudo+exportfs+mount, labels
+	// The NFS-test session (rows 95–249): ~90 mutated re-runs of the SAME
+	// experiment (ssh/sudo/exportfs/mount, labels
 	// "test A"…"test QQQ"), every one failing identically (rc=32 / access
 	// denied). The tool-loop detector is blind to it BY DESIGN: args mutate
 	// every turn (mean adjacent trigram similarity 0.93, but the label always
@@ -777,9 +777,9 @@ export function runSelfTest(): string[] {
 
 	// --- tool calls (default thresholds: 95% args similarity, 2 prior repeats) ---
 	const common =
-		"cd /srv/work && ulimit -l unlimited 2>/dev/null; export GPU_WORKAROUND=1 ACCELERATOR_VISIBLE=1; " +
-		"setsid ./llama.cpp/build-unroll/bin/llama-server " +
-		"-m /srv/work/models/example-model-q4.gguf " +
+		"cd /srv/work && ulimit -l unlimited 2>/dev/null; export GPU_WORKAROUND=1 ACCELERATOR_VISIBLE=0; " +
+		"setsid ./llama.cpp/build/bin/llama-server " +
+		"-m /srv/models/example-model-q4.gguf " +
 		"-dev GPU0 -ngl 999 -fa on -c 8192 -fit off -np 1 -sm row -ub 2048 " +
 		"--spec-type draft-mtp --spec-draft-n-max 2 --spec-draft-n-min 0 --spec-draft-p-min 0.4 " +
 		"--reasoning off --jinja --host 127.0.0.1 --port 8080 --no-webui";
@@ -896,13 +896,13 @@ export function runSelfTest(): string[] {
 	out.push(`structural 0.90           → ${isVerbatimRepeat(dl("structural", 0.9)) ? "yes" : "no"} (exp no) ${!isVerbatimRepeat(dl("structural", 0.9)) ? "✅" : "❌"}`);
 
 	// --- v1.6: intra-message degenerate repetition (single-message meltdown) ---
-	// Regression: the real session /srv 2026-09-09T15-43 — ONE 46 KB bash call
-	// whose username list repeats "lorem" 5145 times (run of 5140). Every
-	// cross-message detector needs a peer message and stayed silent; the
+	// Regression: ONE 46 KB bash call whose argument list repeats "lorem" 5145
+	// times (run of 5140) — verified against a real stuck-generation session.
+	// Every cross-message detector needs a peer message and stayed silent; the
 	// degenerate scan must fire on the FIRST such message, alone in the window.
 	const argJson = (cmd: string) => JSON.stringify({ command: cmd }); // stored args form
 	const meltdownCmd =
-		`echo "=== brute usernames with host pw ==="; for u in alice alice@ j bob bob@ root carol ${`lorem `.repeat(400)}; do :; done`;
+		`echo "=== brute usernames ==="; for u in alice alice@ j bob bob@ root carol ${`lorem `.repeat(400)}; do :; done`;
 	const meltMsg = mk("", [{ name: "bash", args: argJson(meltdownCmd) }]);
 	const mDet = detectLoops(asState([meltMsg]), tcfg);
 	const mHit = mDet.find((d) => d.type === "degenerate");
@@ -993,15 +993,15 @@ export function runSelfTest(): string[] {
 
 	// --- v1.6.1: no-progress outcome runs (mutated re-runs, same outcome) ---
 	// Regression: the NFS session — ~90 mutated re-runs of the SAME experiment
-	// (ssh exportfs/mount, labels test A…test QQQ, targets alternating data-a /
-	// data-b), every one failing rc=32. Args mutate each turn (same call
+	// (ssh exportfs/mount, labels test A…test QQQ, targets alternating
+	// data-a / data-b), every one failing rc=32. Args mutate each turn (same call
 	// never recurs → tool-loop silent) and journalctl noise varies per attempt,
 	// but the FAILURE SIGNATURE repeats: that IS the loop. Fires on the 9th
 	// attempt (8 prior same-failure matches ≥ outcomeMinRepeats).
 	const nfsCmd = (label: string, target: string) =>
 		argJson(
 			`sshpass -p X ssh -o ConnectTimeout=10 user@host 'cd /tmp && echo X | sudo -S bash -c "echo --- test ${label}: rootdir=/volume/data, absolute paths, fsid=0 and 1, mount /${target} ---; ` +
-			`cat > /etc/exports << EOF\n/volume/data/data-a *(rw,sync,no_subtree_check,fsid=0)\nEOF\nexportfs -ra\nsystemctl restart nfs-server\n` +
+			`cat > /etc/exports << EOF\n/volume/data *(rw,sync,no_subtree_check,fsid=0)\nEOF\nexportfs -ra\nsystemctl restart nfs-server\n` +
 			`mount -t nfs4 -o vers=4.2 127.0.0.1:/${target} /tmp/nfstest 2>&1; echo rc=\$?; journalctl -u nfs-mountd | tail -4"' 2>&1`,
 		);
 	const nfsFailFor = (target: string, sec: number) =>
@@ -1082,7 +1082,7 @@ export function runSelfTest(): string[] {
 	out.push(`isFailResult gate         → err| → ${isFailResult("err|boom") ? "fail" : "ok"}, rc32 → ${isFailResult("ok|rc32 denied") ? "fail" : "ok"}, rc0/ok → ${isFailResult("ok|rc 0 12 passed") ? "fail" : "ok"} (exp fail, fail, ok) ${isFailResult("err|boom") && isFailResult("ok|rc32 denied") && !isFailResult("ok|rc 0 12 passed") ? "✅" : "❌"}`);
 
 	// --- v1.8: snapshot/read-only tools are idempotent reads, not loops ---
-	// Regression (real session /srv 2026-09-23T21:35): a coordinator closed
+	// Regression (verified against a real session): a coordinator closed
 	// N agents that had ALREADY settled by calling trimegisto_harvest five times
 	// with `{}`; every call returned the SAME 2.3 KB cumulative snapshot (all
 	// agents done). Same args + same result ×5 → the tool detector force-broke

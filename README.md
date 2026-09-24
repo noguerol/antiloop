@@ -329,7 +329,7 @@ All strategies above need at least two similar messages — they detect a model
 failure mode they cannot see: the model's decoder **anchors on a token and
 stops producing new output**, repeating the same word hundreds of times
 *inside a single message or tool call*. Real case (session `2026-09-09T15-43`,
-/srv — the model on llama.cpp): one 46 KB `bash` call whose SSH
+a local llama.cpp server): one 46 KB `bash` call whose SSH
 username wordlist repeated `lorem` **5145 times** (a run of 5140 — 99% of
 the payload). Every cross-message detector stayed silent (nothing to compare
 against — it happened exactly once), and only a manual ESC stopped it.

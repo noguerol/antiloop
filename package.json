@@ -1,6 +1,6 @@
 {
   "name": "pi-antiloop",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Antiloop: detect reasoning loops and force a break (warn → force → abort) across text, tool, thinking, structural, degenerate-repetition, block/narration-repetition, and no-progress outcome patterns. Degenerate (one message stuck repeating a word hundreds of times — lorem ×5145) is caught at message_end and its bash blocked before executing. Block (ONE message replaying whole sentences/phrases — the 'Let me start by checking the environment…' ×5 narration loop, invisible to every cross-message detector because there is no peer) fires on the first such message with the same strong turn weight and blocks a replayed bash command. No-progress (the NFS test-A…QQQ class: ~90 mutated re-runs of the same experiment, every one failing identically) fires when the same failing outcome repeats ≥ outcomeMinRepeats times with near-identical args. Snapshot tools (trimegisto_harvest) are exempt: a coordinator closing N settled agents re-reads the SAME board serially, which is an idempotent read, not a loop — so isVerbatimRepeat never fires on it. Fixes antiloop going blind mid-session: tracked messages use a monotonic sequence so the trim of the sliding window can never collide turn indices. The force break is delivered mid-run (steer before the next LLM call) and if the model ignores it antiloop aborts the run — an autonomous tool loop always terminates. Result-aware tool-loop detection keeps sequential bash and converging sweeps quiet; task-stream recognition keeps punched/plan batch work quiet.",
   "keywords": [
     "pi-package",
@@ -9,7 +9,7 @@
     "reasoning",
     "monitoring"
   ],
-  "author": "antiloop contributors <https://github.com/noguerol>",
+  "author": "antiloop contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
