@@ -166,11 +166,16 @@ export function scanMessageDegenerate(
 	content: string,
 	toolCalls: TrackedToolCall[] | undefined,
 	config: AntiloopConfig,
+	thinking?: string,
 ): DegenerateHit | undefined {
 	if (!config.detectDegenerate) return undefined;
 	if (content && content.length) {
 		const d = findDegenerateRepetition(content, config);
 		if (d) return { ...d, where: "message text" };
+	}
+	if (thinking && thinking.length) {
+		const d = findDegenerateRepetition(thinking, config);
+		if (d) return { ...d, where: "thinking" };
 	}
 	for (const tc of toolCalls ?? []) {
 		if (!tc.args) continue;
@@ -227,6 +232,50 @@ export interface BlockRepeatHit extends BlockRepeatInfo {
 }
 
 /**
+ * Detect sentence-level replay inside ONE payload — the terse-loop class
+ * ("Enough. Writing. Go. Now." repeated) that the n-gram path cannot see: a
+ * one-word sentence produces no recurring 5-gram and the payload is far below
+ * blockMinTokens. Splits on sentence terminators and line breaks, keeps
+ * letter-bearing parts only, and returns the repetition stats when ≥ 6
+ * sentences are dominated by one repeated ≥ max(3, blockMinRepeats) times with
+ * ≤ 50% unique sentences and ≥ 8 total words.
+ */
+export function findRepeatedSentences(text: string, config: AntiloopConfig): BlockRepeatInfo | undefined {
+	// Sentence boundaries: a run of . ! ? only when followed by whitespace or
+	// end-of-string (so 10.0.0.1 / 1.5.0 stay intact), plus line breaks. `;` is
+	// deliberately NOT a boundary — CSV-like "a;b;a;b" is not a sentence replay.
+	const parts: string[] = [];
+	for (const raw of String(text).toLowerCase().split(/[.!?]+(?=\s|$)|\r\n|\r|\n/)) {
+		const s = raw.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+		// A sentence carries at least one letter; pure digit/punctuation
+		// fragments (IP octets, version numbers) are splitting artifacts.
+		if (s && /\p{L}/u.test(s)) parts.push(s);
+	}
+	if (parts.length < 6) return undefined;
+	const counts = new Map<string, number>();
+	for (const p of parts) counts.set(p, (counts.get(p) ?? 0) + 1);
+	let top = 0;
+	let topSentence = "";
+	for (const [p, c] of counts) {
+		if (c > top) {
+			top = c;
+			topSentence = p;
+		}
+	}
+	if (top < Math.max(3, config.blockMinRepeats)) return undefined;
+	if (counts.size / parts.length > 0.5) return undefined;
+	const totalWords = parts.reduce((n, p) => n + p.split(" ").length, 0);
+	if (totalWords < 8) return undefined;
+	return {
+		ratio: 1 - counts.size / parts.length,
+		repeats: top,
+		tokens: totalWords,
+		ngram: 0,
+		sample: topSentence,
+	};
+}
+
+/**
  * Detect phrase/block-level self-repetition inside ONE payload. Returns the
  * coverage ratio with the most repeated n-gram, or undefined for normal text.
  *
@@ -234,9 +283,18 @@ export interface BlockRepeatHit extends BlockRepeatInfo {
  * and punctuation are separators, so stored-JSON escaping cannot glue tokens).
  * Coverage counts an n-gram position as repeated when the SAME n-word sequence
  * (digits included, so templated lines with varying numbers do not count)
- * occurs somewhere else in the payload.
+ * occurs somewhere else in the payload. With opts.sentences the sentence-level
+ * branch above runs first (terse loops below the token floor).
  */
-export function findRepetitiveBlock(text: string, config: AntiloopConfig): BlockRepeatInfo | undefined {
+export function findRepetitiveBlock(
+	text: string,
+	config: AntiloopConfig,
+	opts?: { sentences?: boolean },
+): BlockRepeatInfo | undefined {
+	if (opts?.sentences) {
+		const s = findRepeatedSentences(text, config);
+		if (s) return s;
+	}
 	const words = String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu);
 	if (!words) return undefined;
 	const total = words.length;
@@ -278,11 +336,16 @@ export function scanMessageBlock(
 	content: string,
 	toolCalls: TrackedToolCall[] | undefined,
 	config: AntiloopConfig,
+	thinking?: string,
 ): BlockRepeatHit | undefined {
 	if (!config.detectBlockRepeats) return undefined;
 	if (content && content.length) {
-		const b = findRepetitiveBlock(content, config);
+		const b = findRepetitiveBlock(content, config, { sentences: true });
 		if (b) return { ...b, where: "message text" };
+	}
+	if (thinking && thinking.length) {
+		const b = findRepetitiveBlock(thinking, config, { sentences: true });
+		if (b) return { ...b, where: "thinking" };
 	}
 	for (const tc of toolCalls ?? []) {
 		if (!tc.args) continue;
@@ -293,6 +356,10 @@ export function scanMessageBlock(
 }
 
 export function blockRepeatDescription(hit: BlockRepeatHit): string {
+	if (hit.ngram === 0) {
+		const uniquePct = Math.round((1 - hit.ratio) * 100);
+		return `${hit.where}: block repetition — sentence replay: "${hit.sample}" ×${hit.repeats} (${hit.tokens} words, only ${uniquePct}% unique)`;
+	}
 	const pct = Math.round(hit.ratio * 100);
 	return `${hit.where}: block repetition — ${pct}% of ${hit.tokens} tokens replay repeated ${hit.ngram}-word phrases ("${hit.sample}" ×${hit.repeats})`;
 }
@@ -531,7 +598,7 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 	// block (whole sentences/phrases replayed — the narration-loop class).
 	if (config.detectDegenerate) {
 		const last = win[win.length - 1];
-		const hit = scanMessageDegenerate(last.content, last.toolCalls, config);
+		const hit = scanMessageDegenerate(last.content, last.toolCalls, config, last.thinking);
 		if (hit) {
 			out.push({
 				type: "degenerate",
@@ -545,7 +612,7 @@ export function detectLoops(state: AntiloopState, config: AntiloopConfig): LoopD
 
 	if (config.detectBlockRepeats) {
 		const last = win[win.length - 1];
-		const hit = scanMessageBlock(last.content, last.toolCalls, config);
+		const hit = scanMessageBlock(last.content, last.toolCalls, config, last.thinking);
 		if (hit) {
 			out.push({
 				type: "block",
@@ -1107,6 +1174,36 @@ export function runSelfTest(): string[] {
 	const noSnapCfg: AntiloopConfig = { ...tcfg, snapshotTools: [] };
 	const snapLoud = detectLoops(asState(harvestMsgs), noSnapCfg);
 	out.push(`snapshot off = loop       → ${snapLoud.some((d) => d.type === "tool") ? "tool" : "no"} (exp tool — normal tools still loop) ${snapLoud.some((d) => d.type === "tool") ? "✅" : "❌"}`);
+
+	// --- v1.9: terse sentence-replay loops (also emitted as reasoning) ---
+	// Regression: a real session looped on terse repeated sentences
+	// ("Enough. / Writing. / Go. / Now. / Writing the call.") emitted as
+	// reasoning. findRepetitiveBlock needs ≥ blockMinTokens (120) words and
+	// 5-word n-grams, so one-word sentences never qualified; the intra-message
+	// scans also ignored thinking entirely. The sentence detector closes both.
+	const TERSE = ("Enough.\n\nWriting.\n\nGo.\n\nNow.\n\nWriting the call.\n\n").repeat(4);
+	const terseDet = detectLoops(asState([mk(TERSE)]), tcfg);
+	out.push(`sentence replay in text  → ${terseDet.some((d) => d.type === "block") ? "block" : "no"} (exp block) ${terseDet.some((d) => d.type === "block") ? "✅" : "❌"}`);
+	const terseThinkingMsg: TrackedMessage = { content: "", thinking: TERSE, timestamp: Date.now(), turnIndex: 0 };
+	const terseThinkDet = detectLoops(asState([terseThinkingMsg]), tcfg);
+	out.push(`sentence replay in think → ${terseThinkDet.some((d) => d.type === "block") ? "block" : "no"} (exp block) ${terseThinkDet.some((d) => d.type === "block") ? "✅" : "❌"}`);
+	const terseScan = scanMessageBlock("", undefined, tcfg, TERSE);
+	out.push(`scan thinking sentences  → ${terseScan ? `block (${terseScan.where})` : "no"} (exp block via thinking) ${terseScan && terseScan.where === "thinking" ? "✅" : "❌"}`);
+	const sp1 = findRepetitiveBlock(prose, tcfg, { sentences: true });
+	const sp2 = findRepetitiveBlock(logLines, tcfg, { sentences: true });
+	const sp3 = findRepetitiveBlock("I will read the file, then run the tests and report the results to you.", tcfg, { sentences: true });
+	out.push(`sentence legit prose/logs→ ${sp1 || sp2 || sp3 ? "flag" : "ok"} (exp ok — no false positives) ${!sp1 && !sp2 && !sp3 ? "✅" : "❌"}`);
+	// Hardening (v1.9.0 adversarial QA): the splitter must not fragment dotted
+	// or numeric content, `;` is not a sentence boundary, and a handful of
+	// repeated fragments is not enough evidence — legitimate payloads stay
+	// silent. (Real false positives before this guard: IPs became "0"×8,
+	// version lists, code diffs, CSV rows and status prose all fired.)
+	const fpIp = findRepetitiveBlock("server 10.0.0.1\nserver 10.0.0.1\nserver 10.0.0.1\nbackup 10.0.0.2", tcfg, { sentences: true });
+	const fpVer = findRepetitiveBlock("val 1.5.0\nval 1.5.0\nval 1.5.0\nother 2.6.1", tcfg, { sentences: true });
+	const fpDiff = findRepetitiveBlock("+  const x = 1\n+  const x = 1\n+  const x = 1\n+  const y = 2", tcfg, { sentences: true });
+	const fpCsv = findRepetitiveBlock("a;b;a;b;a;b;a;b", tcfg, { sentences: true });
+	const fpProse = findRepetitiveBlock("Build is green. Tests are green. Build is green. Build is green.", tcfg, { sentences: true });
+	out.push(`sentence FP dotted/;/diff → ${fpIp || fpVer || fpDiff || fpCsv || fpProse ? "flag" : "ok"} (exp ok — IP/version/CSV/diff/prose not loops) ${!fpIp && !fpVer && !fpDiff && !fpCsv && !fpProse ? "✅" : "❌"}`);
 
 	return out;
 }

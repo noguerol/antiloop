@@ -275,7 +275,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		if (content.length >= 50 || toolCalls.length > 0) {
+		if (content.length >= 50 || thinking.length >= 50 || toolCalls.length > 0) {
 			state.recentMessages.push({
 				content,
 				thinking: thinking || undefined,
@@ -312,7 +312,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 		} = await import("./detect.ts");
 		let det: LoopDetection | undefined;
 		if (config.detectDegenerate) {
-			const degHit = scanMessageDegenerate(content, toolCalls, config);
+			const degHit = scanMessageDegenerate(content, toolCalls, config, thinking);
 			if (degHit) {
 				det = {
 					type: "degenerate",
@@ -324,7 +324,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 			}
 		}
 		if (!det && config.detectBlockRepeats) {
-			const blkHit = scanMessageBlock(content, toolCalls, config);
+			const blkHit = scanMessageBlock(content, toolCalls, config, thinking);
 			if (blkHit) {
 				det = {
 					type: "block",

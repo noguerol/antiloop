@@ -12,7 +12,7 @@
 
 ## Features
 
-- **Seven detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + near-identical arguments + same outcome — result-aware, so retries that make progress don't false-positive), thinking blocks, structural opening-phrase patterns, **degenerate repetition** (a single message/call stuck repeating one word hundreds of times — the `lorem ×5145` meltdown — caught at `message_end` with no repeated peer needed, and degenerate bash commands blocked before they execute), **block repetition** (ONE message replaying whole sentences/phrases — the narration loop: `Let me start by checking the environment…` ×5 — same `message_end` timing and strong turn weight), and **no-progress outcome runs** (the NFS `test A…QQQ` class: dozens of near-identical re-runs of the same experiment, every one ending in the *same failing outcome* — args mutate so tool-loop can't see it; the repeated failure signature can)
+- **Seven detection strategies** — text repetition (trigram Jaccard + Levenshtein), tool-call sequences (name + near-identical arguments + same outcome — result-aware, so retries that make progress don't false-positive), thinking blocks, structural opening-phrase patterns, **degenerate repetition** (a single message/call stuck repeating one word hundreds of times — the `lorem ×5145` meltdown — caught at `message_end` with no repeated peer needed, and degenerate bash commands blocked before they execute), **block repetition** (ONE message replaying whole sentences/phrases — the narration loop: `Let me start by checking the environment…` ×5 — plus, since v1.9.0, short/terse sentence replays like `Enough. Writing. Go. Now.` and the model's thinking — same `message_end` timing and strong turn weight), and **no-progress outcome runs** (the NFS `test A…QQQ` class: dozens of near-identical re-runs of the same experiment, every one ending in the *same failing outcome* — args mutate so tool-loop can't see it; the repeated failure signature can)
 - **Stays alive in long sessions** — tracked messages carry a monotonic sequence number, so trimming the sliding window can never make the dedupe guard skip later messages (a bug that silently blinded antiloop after ~15 tracked messages)
 - **Task-stream recognition (batch work)** — when another extension (e.g. `punched` appending lines to pi.md, or `plan` adding tasks) makes the model call the *same* tool many times with *different* content, antiloop recognizes it as N distinct tasks of one type and stays silent — no warning, no force break. A genuine loop (the *same* call repeated verbatim) is still caught
 - **Snapshot/read-only tool exemption** — a coordinator closing N agents that already finished calls `trimegisto_harvest` once per agent and gets the *same* settled board every time; identical reads of a status snapshot are an idempotent serial close, not a loop, so `snapshotTools` (configurable) is exempt from tool-loop and no-progress detection — real `bash` loops next to it are still caught
@@ -207,7 +207,7 @@ After every assistant `message_end` event, antiloop extracts the new content (te
 | Thinking | Internal reasoning/thinking blocks | Same as text |
 | Structural | First 10 words of each message | Opening-phrase similarity ≥ 90% across ≥ 3 messages |
 | Degenerate | One single message/call (no peer needed) | Run-length + frequency of identical words inside the payload: ≥ `degenerateMaxRun` (default 16) consecutive identical words, or one word ≥ `degenerateMaxFreq`× at ≥ `degenerateMaxShare` of all tokens; plus a perfect-power check for glued no-space tokens. Scanned at `message_end` — before the tool calls execute — and on every `bash` `tool_call` (blocking gate) |
-| Block | One single message (no peer needed) | Sliding `blockNgram`-word n-grams over the normalized payload: a payload of ≥ `blockMinTokens` (120) words is a replay when ≥ `blockRepeatShare` (default 85%) of the n-gram positions recur AND the most repeated n-gram appears ≥ `blockMinRepeats` (3) times. Catches a message replaying whole sentences/phrases — the narration loop (`Let me start by checking the environment…` ×5) that every cross-message detector misses because there is no peer. Scanned at `message_end` and on every `bash` `tool_call` (blocking gate) |
+| Block | One single message or its thinking (no peer needed) | Sliding `blockNgram`-word n-grams over the normalized payload: a payload of ≥ `blockMinTokens` (120) words is a replay when ≥ `blockRepeatShare` (default 85%) of the n-gram positions recur AND the most repeated n-gram appears ≥ `blockMinRepeats` (3) times. Since v1.9.0 a short/terse payload (`Enough. Writing. Go. Now.`) is also caught by sentence-level replay detection — ≥ 6 sentences, the top sentence repeated ≥ `blockMinRepeats` (3) times, ≤ 50% unique sentences, ≥ 8 words; dots inside IPs/versions and `;` are not sentence boundaries — which runs before the `blockMinTokens` early return and scans the assistant's thinking too. Catches a message replaying whole sentences/phrases — the narration loop (`Let me start by checking the environment…` ×5) that every cross-message detector misses because there is no peer. Scanned at `message_end` and on every `bash` `tool_call` (blocking gate) |
 | Outcome | Single tool calls across the window, after the last user input | ≥ `outcomeMinRepeats` (default 8) PRIOR attempts with args ≥ `outcomeArgSimilarity` (0.85) similar AND the same *failing* outcome (failure signatures compared at ≥ `outcomeSigThreshold`, 0.7; identical OK results never count — they're the norm for batches). Catches mutated re-run loops the tool detector can't see (labels/permutations change every turn) |
 | Task stream | Same tool, many calls | When a tool appears ≥ `taskStreamMinCalls` times (default 3) in the window and *no two* calls are near-identical (`taskStreamTwinThreshold`, default 99%), the tool is an active batch: N different tasks of one type (e.g. `punched_log` appends, `plan_manager` task adds). Those calls are exempt from tool-loop detection, and text/thinking/structural patterns that only involve those batch messages are suppressed too. If even one call pair is a twin (the same task repeated), the tool is *not* a stream and detection proceeds normally |
 
@@ -411,6 +411,35 @@ force-break steer, another replayed block escalates to the hard stop.
 Tunables: `detectBlockRepeats`, `blockRepeatShare` (lower = earlier),
 `blockMinRepeats`, `blockNgram`, `blockMinTokens`.
 
+### Terse sentence loops & thinking
+
+The v1.7 block detector above only saw **long narration**: its n-gram path
+needs a payload of at least `blockMinTokens` (120) words before it starts
+looking for recurring phrases, so a model that stalled into short, clipped
+sentences — `Enough. Writing. Go. Now. Enough. Writing. Go. Now.` — slipped
+through. Each sentence is one or two words, the payload never reaches the
+token floor, and a one-word sentence produces no 5-word n-gram at all.
+
+Antiloop v1.9.0 adds **sentence-level replay detection** to the same block
+detector. Before the n-gram path (and before the `blockMinTokens` early
+return) the payload is split on sentence terminators (runs of `.`/`!`/`?`
+followed by whitespace or end-of-string, plus line breaks — so `10.0.0.1` and
+`1.5.0` are never fragmented, and `;` is not a boundary) and each part is
+normalized to its letters and digits, keeping only parts that contain at least
+one letter; the detector also scans the assistant's **thinking** with the same
+rules, since a model deep in a terse loop keeps replaying the same clipped
+plan inside its reasoning too. It stays deliberately conservative — a single
+restated sentence is a summary, not a loop: the payload needs at least **6
+sentences**, the most repeated sentence must occur at least `blockMinRepeats`
+(**3**) times, at most **50%** of the sentences may be unique, and the payload
+must hold at least **8** total words.
+Because the signal is conclusive it is handled exactly like the long block
+case: caught at `message_end` (before the message's tools execute), weighted
+`degenerateTurnWeight` (2) so the first occurrence warns, and a replayed
+`bash` command is refused by the same `blockDegenerateBash` gate. No new
+tunables: the sentence path reuses `blockMinRepeats` and inherits
+`detectBlockRepeats` as its switch.
+
 ### No-progress outcome runs: mutated re-runs, same wall
 
 A subtler meltdown than the degenerate one: the model re-runs the SAME
@@ -548,7 +577,7 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 6. **Let user input clear state** — each user message decays the consecutive counter by 2, so a fresh prompt naturally resets without `/antiloop reset`.
 7. **Degenerate detector needs no tuning for most setups** — a run of ≥ 16 identical words (or one word ≥ 40% of a ≥ 50-token payload) inside a single message is conclusive stuck generation; the 46 KB `lorem ×5145` SSH-wordlist meltdown is caught on first sight (warning), its bash never executes (`blockDegenerateBash`), and a second consecutive meltdown gets the force-break steer. If a model legitimately writes repetitive payloads, raise `degenerateMaxRun` / `degenerateMaxFreq` via `/antiloop config` — don't disable the detector.
 8. **Outcome detector catches mutated re-run loops** — a model that re-issues the same experiment with cosmetic changes (labels, permutations) while every attempt fails identically gets a warning after `outcomeMinRepeats` (8) same-failure attempts, a steer on the next, and a hard stop shortly after. Converging sweeps, evolving failures and repeated successes stay silent by design. Lower `outcomeMinRepeats` if you want earlier cutoffs.
-9. **Block detector catches narration loops** — a single message replaying whole sentences (the `Let me start by checking the environment…` ×5 class) warns on first sight and escalates like a meltdown. It only fires when ≥ 85% of the message's 5-word phrases recur, so ordinary prose and templated logs/code stay silent. Raise `blockRepeatShare` (or `blockMinRepeats`) if you ever see a false positive.
+9. **Block detector catches narration loops** — a single message replaying whole sentences (the `Let me start by checking the environment…` ×5 class), or a terse one-word-sentence loop (`Enough. Writing. Go. Now.`) spotted by the v1.9.0 sentence-level path (which also scans the model's thinking), warns on first sight and escalates like a meltdown. The n-gram path only fires when ≥ 85% of the message's 5-word phrases recur, so ordinary prose and templated logs/code stay silent. Raise `blockRepeatShare` (or `blockMinRepeats`) if you ever see a false positive.
 10. **`/antiloop test`** — runs the real detection engine (text + tool-call + task-stream + degenerate + block + outcome regression cases) to verify calibration after any change.
 
 ## Architecture
