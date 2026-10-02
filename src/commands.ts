@@ -65,7 +65,7 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		`  snapshot tools: ${rt.config.snapshotTools?.length ? rt.config.snapshotTools.join(", ") : "off"} (repeated reads are not a loop)`,
 		"",
 		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)} · block ${yn(rt.config.detectBlockRepeats)} · outcome ${yn(rt.config.detectOutcomeLoops)}`,
-		`footer: interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
+		`footer: hidden ${yn(rt.config.hideStatus)} · interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
 	];
 	if (rt.state.activeTaskStreams.length) {
 		lines.push("", `active batch: ${rt.state.activeTaskStreams.map((x) => `${x.tool}×${x.count}`).join(", ")}`);
@@ -84,6 +84,7 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "toggle" as const, label: c.enabled ? "🟢 disable" : "🔴 enable", description: "turn detection on or off" },
 		{ value: "window" as const, label: `⏳ window: ${c.detectionWindow} msgs`, description: "how many recent messages are analyzed" },
 		{ value: "notify" as const, label: `🔔 notifications: ${yn(c.notifyOnDetection)}`, description: "show a warning when a loop is detected" },
+		{ value: "hideStatus" as const, label: `📊 hide status: ${yn(c.hideStatus)}`, description: "hide footer indicators without disabling detection or notifications" },
 		{ value: "footer" as const, label: `📊 interactive footer: ${yn(c.interactiveFooter)}`, description: "experimental: replaces pi's footer and captures keystrokes (leave off if it misbehaves)" },
 		{ value: "shortcut" as const, label: `⌨️ shortcut: ${c.toggleShortcut}`, description: "keys to toggle on/off without typing a command" },
 		// ── 🎯 Detection ────────────────────────────────────────────
@@ -137,6 +138,12 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		case "notify":
 			c.notifyOnDetection = !c.notifyOnDetection; saveConfig(c);
 			ctx.ui.notify(`notifications: ${yn(c.notifyOnDetection)}`, "info"); break;
+		case "hideStatus":
+			c.hideStatus = !c.hideStatus; saveConfig(c);
+			ctx.ui.notify(`hide status: ${yn(c.hideStatus)}`, "info");
+			rt.refreshFooter?.(ctx);
+			rt.updateStatus(ctx);
+			break;
 		case "footer":
 			c.interactiveFooter = !c.interactiveFooter; saveConfig(c);
 			ctx.ui.notify(`interactive footer: ${yn(c.interactiveFooter)}`, "info");
