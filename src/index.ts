@@ -82,8 +82,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
-		// Always set a status line so the footer shows on/off either way.
-		ctx.ui.setStatus("antiloop", antiloopStatusText());
+		ctx.ui.setStatus("antiloop", config.hideStatus ? undefined : antiloopStatusText());
 		activeTui?.requestRender();
 	}
 
@@ -166,8 +165,8 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	// built-in footer's useful data (pwd, branch, ctx %, model) preserved.
 	// ------------------------------------------------------------------
 	function installFooter(ctx: ExtensionContext): void {
-		if (!config.interactiveFooter || ctx.mode !== "tui") {
-			ctx.ui.setFooter(undefined);
+		if (config.hideStatus || !config.interactiveFooter || ctx.mode !== "tui") {
+			if (activeTui) ctx.ui.setFooter(undefined);
 			activeTui = undefined;
 			return;
 		}
@@ -541,9 +540,7 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_e, ctx) => {
-		// Restore the built-in footer on shutdown (in case another extension
-		// installs its own footer later, or the TUI is torn down).
-		ctx.ui.setFooter(undefined);
+		if (activeTui) ctx.ui.setFooter(undefined);
 		activeTui = undefined;
 	});
 

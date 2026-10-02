@@ -120,6 +120,7 @@ Grouped interactive menu showing the current value in each option:
 - **🟢/🔴 enable/disable** — turn detection on or off
 - **⏳ window** — `5 / 10 / 15 / 20` — how many recent messages are analyzed (default 10)
 - **🔔 notifications** — on/off — show a warning when a loop is detected
+- **📊 hide status** — on/off — hide the persistent status and interactive footer without disabling detection or notifications (default off)
 - **📊 interactive footer** — on/off — experimental: replaces pi's footer and captures keystrokes for the toggle shortcut (leave it off if it misbehaves)
 - **⌨️ shortcut** — `esc+a` or off — key press to toggle without typing a command
 
@@ -459,6 +460,12 @@ Only the last `detectionWindow` messages participate in comparisons, so detectio
 
 Persisted as JSON at `~/.pi/agent/antiloop.json`:
 
+To keep detection active without a persistent footer indicator, set `"hideStatus": true`
+and reload pi, or toggle **hide status** in `/antiloop config`. This overrides
+`interactiveFooter`, including its keyboard shortcut, but leaves notifications,
+interventions and `/antiloop` commands available. Omit it or set it to `false`
+to keep the existing display.
+
 ```json
 {
   "enabled": true,
@@ -494,7 +501,8 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
   "notifyOnDetection": true,
   "maxHistoryEntries": 100,
   "detectionWindow": 10,
-  "interactiveFooter": true,
+  "hideStatus": false,
+  "interactiveFooter": false,
   "toggleShortcut": "esc+a"
 }
 ```
@@ -535,7 +543,8 @@ Persisted as JSON at `~/.pi/agent/antiloop.json`:
 | `notifyOnDetection` | `true` | Show a notification on every detection |
 | `maxHistoryEntries` | `100` | Max detection history entries |
 | `detectionWindow` | `10` | Number of recent messages to analyze |
-| `interactiveFooter` | `true` | TUI footer replaces the built-in one with an antiloop indicator + toggle shortcut (set `false` to keep the built-in footer and only the `setStatus` line) |
+| `hideStatus` | `false` | Hide the persistent status and interactive footer, including its shortcut. Detection, notifications and commands remain active. Takes precedence over `interactiveFooter` |
+| `interactiveFooter` | `false` | TUI footer replaces the built-in one with an antiloop indicator + toggle shortcut (when false, only the `setStatus` line is published unless `hideStatus` is true) |
 | `toggleShortcut` | `esc+a` | Key sequence that toggles antiloop from the footer (`esc+a` or `off`). Honored only while pi is idle (ESC is also pi's interrupt key — typing `a` right after cancelling a stuck run must not silently switch antiloop off). The input is never consumed, so typing is unaffected |
 
 ## Best Practices
@@ -578,6 +587,12 @@ Modular extension with zero external dependencies (only pi's bundled `@earendil-
 - **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` + a custom `ctx.ui.setFooter` component for the persistent footer indicator, live level info, and the `esc+a` keyboard toggle (`ctx.ui.onTerminalInput`, never consumes input)
 - **Hooks** — `message_end` (track messages + tool call ids with a monotonic sequence so the sliding-window trim can never collide turn indices, and pre-handle degenerate/block repetition — the message is complete but its tools haven't executed yet), `tool_call` (block degenerate or replayed `bash` commands before they run), `turn_end` (attach result fingerprints with failure signatures, detect — including no-progress outcome runs — and intervene: steer the force break / abort the run), `input` (decay on real user messages only), `session_start` (load config + install footer + reset), `session_shutdown` (restore built-in footer)
 - **Intervention runs on the turn loop, not on user prompts** — escalation is decided at `turn_end` (and at `message_end` for the self-contained intra-message signals), the break is steered into the running agent before its next LLM call, and the guaranteed hard stop aborts the run (`ctx.abort`, fire-and-forget — never awaited, so the hook can't deadlock). No custom-role messages are injected into the conversation at any level (steering a real user message + aborting are the only levers; custom-role injections were removed because a model can stall on an unexpected injected message)
+
+## Tests
+
+Run `node --test tests/*.test.mjs` with Node 24 or newer. The tests use Node's
+built-in test runner and TypeScript support, with only the pi host API stubbed;
+no dependency installation is required.
 
 ## License
 
