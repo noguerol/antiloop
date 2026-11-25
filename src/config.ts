@@ -43,11 +43,15 @@ export const DEFAULT_CONFIG: AntiloopConfig = {
 	notifyOnDetection: true,
 	maxHistoryEntries: 100,
 	detectionWindow: 10,
+	// Hidden status is opt-in: no indicator at all (setStatus line and custom
+	// footer), but detection/notifications/commands stay fully active.
 	hideStatus: false,
 	// Custom footer replaces the built-in one while active. Off by default:
 	// pi restores its own footer right after boot anyway, so installing a
 	// look-alike at session_start only produced a transient duplicated-footer
-	// artifact. Unless hideStatus is set, setStatus still shows the on/off indicator.
+	// artifact. Unless hideStatus is set, the 🔄 on/off status still shows via
+	// setStatus in the built-in footer — and antiloop never clears a footer it
+	// does not own, so custom footers from other extensions survive.
 	interactiveFooter: false,
 	toggleShortcut: "esc+a",
 };

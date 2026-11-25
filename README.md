@@ -20,6 +20,8 @@
 - **Configurable thresholds** — independent dials for similarity cutoff, warning/force-break/abort counts, detection window, and which strategies are on
 - **Sliding window** — only the last N messages are compared, so detection is O(N) in the window size, not in the full session
 - **Live footer indicator** — `🔄 antiloop(on|off)` in the footer, per spec, with the current level (`⚠️/🛑/🚨`) and consecutive count; an interactive TUI footer adds a keyboard toggle (`esc+a` by default, configurable/off, honored only while idle) and preserves the built-in footer's pwd/branch/context/model info
+- **Never fights another footer** — antiloop only clears a footer it installed. `ctx.ui.setFooter(undefined)` restores pi's *built-in* footer and throws away whatever another extension registered, so it is never called speculatively at startup or shutdown (this is the [pi-statusline fix](#status-line-footers-and-other-extensions))
+- **Hideable without disabling anything** — `hideStatus` (or `/antiloop hide`) removes every antiloop indicator — status line, custom footer and its shortcut — while detection, notifications, interventions and commands keep working; `/antiloop show` brings it back
 - **Detection log** — timestamped history with similarity scores, filterable through the native pi menu
 - **Self-test** — `/antiloop test` runs built-in cases to verify the similarity engine is calibrated
 - **User input softens detection** — each new user message decays the consecutive counter so a fresh prompt can resolve the loop without manual reset
@@ -72,6 +74,7 @@ That's it. Antiloop is on by default. If the model ever starts repeating itself,
 | `/antiloop` | Toggle on/off |
 | `/antiloop enable` / `/antiloop disable` | Explicit enable/disable |
 | `/antiloop status` | Show current state, configuration, and recent detections |
+| `/antiloop hide` / `/antiloop show` | Hide/restore every antiloop indicator without touching detection |
 | `/antiloop config` | Open interactive configuration menu |
 | `/antiloop log` | Show detection history (last 30, newest first) |
 | `/antiloop reset` | Clear all counters and history |
@@ -120,8 +123,8 @@ Grouped interactive menu showing the current value in each option:
 - **🟢/🔴 enable/disable** — turn detection on or off
 - **⏳ window** — `5 / 10 / 15 / 20` — how many recent messages are analyzed (default 10)
 - **🔔 notifications** — on/off — show a warning when a loop is detected
-- **📊 hide status** — on/off — hide the persistent status and interactive footer without disabling detection or notifications (default off)
-- **📊 interactive footer** — on/off — experimental: replaces pi's footer and captures keystrokes for the toggle shortcut (leave it off if it misbehaves)
+- **🙈 hide status** — on/off — hide the status line *and* the interactive footer (including its shortcut) without disabling detection, notifications or commands (default off)
+- **📊 interactive footer** — on/off — experimental: replaces pi's footer and captures keystrokes for the toggle shortcut (leave it off if it misbehaves; default off)
 - **⌨️ shortcut** — `esc+a` or off — key press to toggle without typing a command
 
 **🎯 Detection**
@@ -489,12 +492,6 @@ Only the last `detectionWindow` messages participate in comparisons, so detectio
 
 Persisted as JSON at `~/.pi/agent/antiloop.json`:
 
-To keep detection active without a persistent footer indicator, set `"hideStatus": true`
-and reload pi, or toggle **hide status** in `/antiloop config`. This overrides
-`interactiveFooter`, including its keyboard shortcut, but leaves notifications,
-interventions and `/antiloop` commands available. Omit it or set it to `false`
-to keep the existing display.
-
 ```json
 {
   "enabled": true,
@@ -572,8 +569,8 @@ to keep the existing display.
 | `notifyOnDetection` | `true` | Show a notification on every detection |
 | `maxHistoryEntries` | `100` | Max detection history entries |
 | `detectionWindow` | `10` | Number of recent messages to analyze |
-| `hideStatus` | `false` | Hide the persistent status and interactive footer, including its shortcut. Detection, notifications and commands remain active. Takes precedence over `interactiveFooter` |
-| `interactiveFooter` | `false` | TUI footer replaces the built-in one with an antiloop indicator + toggle shortcut (when false, only the `setStatus` line is published unless `hideStatus` is true) |
+| `hideStatus` | `false` | Hide the status line **and** the interactive footer, including its shortcut. Detection, notifications, interventions and commands stay active. Takes precedence over `interactiveFooter`; toggle with `/antiloop hide` / `/antiloop show` or the config menu |
+| `interactiveFooter` | `false` | TUI footer replaces the built-in one with an antiloop indicator + toggle shortcut (when false, only the `setStatus` line is published, unless `hideStatus` is true). Enabling it is the only case where antiloop replaces a footer |
 | `toggleShortcut` | `esc+a` | Key sequence that toggles antiloop from the footer (`esc+a` or `off`). Honored only while pi is idle (ESC is also pi's interrupt key — typing `a` right after cancelling a stuck run must not silently switch antiloop off). The input is never consumed, so typing is unaffected |
 
 ## Best Practices
@@ -613,15 +610,53 @@ Modular extension with zero external dependencies (only pi's bundled `@earendil-
 - **Levenshtein + trigram Jaccard** hybrid — small texts use edit distance, large texts use n-gram overlap (each is O(N) in text length)
 - **Sliding window** — only the last `detectionWindow` messages participate, capping memory at O(W × message_size)
 - **Early bail** — short messages and empty tool calls skip similarity computation entirely; the degenerate and block scans are single linear passes
-- **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` + a custom `ctx.ui.setFooter` component for the persistent footer indicator, live level info, and the `esc+a` keyboard toggle (`ctx.ui.onTerminalInput`, never consumes input)
-- **Hooks** — `message_end` (track messages + tool call ids with a monotonic sequence so the sliding-window trim can never collide turn indices, and pre-handle degenerate/block repetition — the message is complete but its tools haven't executed yet), `tool_call` (block degenerate or replayed `bash` commands before they run), `turn_end` (attach result fingerprints with failure signatures, detect — including no-progress outcome runs — and intervene: steer the force break / abort the run), `input` (decay on real user messages only), `session_start` (load config + install footer + reset), `session_shutdown` (restore built-in footer)
+- **TUI integration** — uses `ctx.ui.select` for the config menu and the log viewer; `ctx.ui.notify` for state notifications; `ctx.ui.setStatus` (our own key only) + an optional custom `ctx.ui.setFooter` component for the persistent footer indicator, live level info, and the `esc+a` keyboard toggle (`ctx.ui.onTerminalInput`, never consumes input). Footer changes are ownership-tracked: a footer is disposed only when antiloop installed it, so `setFooter(undefined)` can never wipe another extension's statusline
+- **Hooks** — `message_end` (track messages + tool call ids with a monotonic sequence so the sliding-window trim can never collide turn indices, and pre-handle degenerate/block repetition — the message is complete but its tools haven't executed yet), `tool_call` (block degenerate or replayed `bash` commands before they run), `turn_end` (attach result fingerprints with failure signatures, detect — including no-progress outcome runs — and intervene: steer the force break / abort the run), `input` (decay on real user messages only), `session_start` (load config + install footer only if enabled + reset), `session_shutdown` (restore the built-in footer only if antiloop installed one)
 - **Intervention runs on the turn loop, not on user prompts** — escalation is decided at `turn_end` (and at `message_end` for the self-contained intra-message signals), the break is steered into the running agent before its next LLM call, and the guaranteed hard stop aborts the run (`ctx.abort`, fire-and-forget — never awaited, so the hook can't deadlock). No custom-role messages are injected into the conversation at any level (steering a real user message + aborting are the only levers; custom-role injections were removed because a model can stall on an unexpected injected message)
+
+## Status line, footers and other extensions
+
+Antiloop has two possible indicators, and both are optional:
+
+1. **Status line (default)** — `🔄 a:on` / `🔄 a:off`, plus `⚠️/🛑/🚨` and the
+   consecutive count while a loop is active, published with
+   `ctx.ui.setStatus("antiloop", …)`. Other extensions' status keys are never
+touched.
+2. **Interactive footer (opt-in)** — `interactiveFooter: true` replaces pi's
+   footer with an antiloop line plus the `esc+a` toggle, preserving the
+   built-in pwd/branch/context/model data and rendering **other extensions'
+   statuses** underneath.
+
+**Why this matters (issue #1).** `ctx.ui.setFooter(undefined)` does not mean
+"do nothing" — it restores pi's *built-in* footer and disposes whatever custom
+footer another extension installed. Antiloop used to call it defensively at
+`session_start`/`session_shutdown`, which made
+[`@narumitw/pi-statusline`](https://www.npmjs.com/package/@narumitw/pi-statusline)
+and any other footer extension disappear as soon as antiloop loaded. Since
+v1.10.0 the footer is ownership-tracked: it is installed only when
+`interactiveFooter` is on, and cleared only if antiloop still owns it. A
+replacement installed by another extension is left alone, including at
+shutdown.
+
+**Want no indicator at all?** Set `"hideStatus": true` (or run
+`/antiloop hide`): the status key is cleared, the custom footer and its
+shortcut are never installed, and loop detection, notifications, force breaks,
+aborts and every `/antiloop` command keep working. `/antiloop show` restores
+the indicator.
 
 ## Tests
 
-Run `node --test tests/*.test.mjs` with Node 24 or newer. The tests use Node's
-built-in test runner and TypeScript support, with only the pi host API stubbed;
-no dependency installation is required.
+```bash
+node --test tests/*.test.mjs
+```
+
+Uses Node's built-in test runner with TypeScript type-stripping (Node 22.15+/
+24+), no dependency installation. Only the pi host API is stubbed; the real
+extension, config, command handlers and detectors are loaded. Covered: default
+visibility, hidden lifecycle/commands, footer ownership (issue #1),
+warning/force-break/abort/bash blocking while hidden, live level in the status
+line, config-menu persistence. `/antiloop test` still runs the engine
+self-test in-process.
 
 ## License
 

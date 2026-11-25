@@ -26,6 +26,12 @@ export async function handleCommand(
 			return;
 		case "status":
 			return showStatus(ctx, rt);
+		case "hide":
+		case "hide-status":
+			return setHideStatus(ctx, rt, true);
+		case "show":
+		case "show-status":
+			return setHideStatus(ctx, rt, false);
 		case "config":
 			return showConfigMenu(ctx, rt);
 		case "log":
@@ -44,6 +50,21 @@ export async function handleCommand(
 			rt.updateStatus(ctx);
 			return;
 	}
+}
+
+async function setHideStatus(ctx: ExtensionCommandContext, rt: Runtime, hidden: boolean): Promise<void> {
+	rt.config.hideStatus = hidden;
+	saveConfig(rt.config);
+	// Order matters: drop/install the footer first, then publish (or clear) the
+	// status line, so the two indicators never disagree for a render.
+	rt.refreshFooter?.(ctx);
+	rt.updateStatus(ctx);
+	ctx.ui.notify(
+		hidden
+			? "antiloop: status hidden (detection stays on — /antiloop show to restore)"
+			: "antiloop: status visible",
+		"info",
+	);
 }
 
 async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<void> {
@@ -66,6 +87,7 @@ async function showStatus(ctx: ExtensionCommandContext, rt: Runtime): Promise<vo
 		"",
 		`detectors: text ${yn(rt.config.detectTextLoops)} · tool ${yn(rt.config.detectToolLoops)} · think ${yn(rt.config.detectThinkingLoops)} · degenerate ${yn(rt.config.detectDegenerate)} · block ${yn(rt.config.detectBlockRepeats)} · outcome ${yn(rt.config.detectOutcomeLoops)}`,
 		`footer: hidden ${yn(rt.config.hideStatus)} · interactive ${yn(rt.config.interactiveFooter)} · toggle: ${rt.config.toggleShortcut}`,
+		`footer ownership: ${rt.config.hideStatus ? "no indicator" : rt.config.interactiveFooter ? "custom footer (antiloop)" : "status line in the built-in footer only — other footers are never cleared"}`,
 	];
 	if (rt.state.activeTaskStreams.length) {
 		lines.push("", `active batch: ${rt.state.activeTaskStreams.map((x) => `${x.tool}×${x.count}`).join(", ")}`);
@@ -84,7 +106,7 @@ async function showConfigMenu(ctx: ExtensionCommandContext, rt: Runtime): Promis
 		{ value: "toggle" as const, label: c.enabled ? "🟢 disable" : "🔴 enable", description: "turn detection on or off" },
 		{ value: "window" as const, label: `⏳ window: ${c.detectionWindow} msgs`, description: "how many recent messages are analyzed" },
 		{ value: "notify" as const, label: `🔔 notifications: ${yn(c.notifyOnDetection)}`, description: "show a warning when a loop is detected" },
-		{ value: "hideStatus" as const, label: `📊 hide status: ${yn(c.hideStatus)}`, description: "hide footer indicators without disabling detection or notifications" },
+		{ value: "hideStatus" as const, label: `🙈 hide status: ${yn(c.hideStatus)}`, description: "hide every antiloop indicator (status line + footer) without disabling detection" },
 		{ value: "footer" as const, label: `📊 interactive footer: ${yn(c.interactiveFooter)}`, description: "experimental: replaces pi's footer and captures keystrokes (leave off if it misbehaves)" },
 		{ value: "shortcut" as const, label: `⌨️ shortcut: ${c.toggleShortcut}`, description: "keys to toggle on/off without typing a command" },
 		// ── 🎯 Detection ────────────────────────────────────────────

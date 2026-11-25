@@ -895,7 +895,7 @@ export function runSelfTest(): string[] {
 		similarityThreshold: 0.75, toolSimilarityThreshold: 0.95, minToolRepeatCount: 2,
 		resultSimilarityThreshold: 0.8, detectToolLoops: true, detectThinkingLoops: true,
 		detectTextLoops: true, notifyOnDetection: true, maxHistoryEntries: 100,
-		detectionWindow: 10, interactiveFooter: true, toggleShortcut: "esc+a",
+		detectionWindow: 10, hideStatus: false, interactiveFooter: true, toggleShortcut: "esc+a",
 		detectTaskStreams: true, taskStreamMinCalls: 3, taskStreamTwinThreshold: 0.99,
 		snapshotTools: ["trimegisto_harvest"],
 		detectDegenerate: true, degenerateMinTokens: 50, degenerateMaxRun: 16,

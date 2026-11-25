@@ -76,12 +76,29 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	/** TUI handle for forcing footer re-renders (set by the footer factory). */
 	let activeTui: { requestRender(force?: boolean): void } | undefined;
 
-	/** Status text shown in the footer: "🔄 a:on" / "🔄 a:off" per spec. */
+	/**
+	 * True only while antiloop owns the TUI footer: we installed it and pi has
+	 * not disposed it since. Required because ctx.ui.setFooter(undefined)
+	 * unconditionally restores the BUILT-IN footer — calling it "just in case"
+	 * at startup/shutdown silently destroyed another extension's footer
+	 * (pi-statusline, issue #1).
+	 */
+	let footerInstalled = false;
+
+	/**
+	 * Status text shown in the footer: "🔄 a:on" / "🔄 a:off" per spec, plus the
+	 * live level (⚠️/🛑/🚨) and consecutive count while a detection episode is
+	 * active — the README promises the level is visible in the footer.
+	 */
 	function antiloopStatusText(): string {
-		return config.enabled ? "🔄 a:on" : "🔄 a:off";
+		const base = config.enabled ? "🔄 a:on" : "🔄 a:off";
+		if (state.currentLevel === 0) return base;
+		const count = state.consecutiveDetections > 1 ? ` ×${state.consecutiveDetections}` : "";
+		return `${base} ${ICONS[state.currentLevel]}${count}`;
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
+		// clear/set ONLY our own key: other extensions' statuses are untouched.
 		ctx.ui.setStatus("antiloop", config.hideStatus ? undefined : antiloopStatusText());
 		activeTui?.requestRender();
 	}
@@ -163,11 +180,24 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	// per spec — "🔄 antiloop(on|off)" — plus live detection info, a
 	// keyboard toggle (esc+a by default, configurable/off), and the
 	// built-in footer's useful data (pwd, branch, ctx %, model) preserved.
+	//
+	// Ownership rule: a footer is only ever removed when antiloop installed
+	// it. Handing `undefined` to ctx.ui.setFooter restores pi's built-in
+	// footer and discards whatever another extension had installed — the
+	// exact regression reported in issue #1 (@narumitw/pi-statusline).
 	// ------------------------------------------------------------------
+
+	/** Drop the custom footer, but only if it is ours. */
+	function uninstallFooter(ctx: ExtensionContext): void {
+		const owned = footerInstalled;
+		footerInstalled = false;
+		activeTui = undefined;
+		if (owned) ctx.ui.setFooter(undefined);
+	}
+
 	function installFooter(ctx: ExtensionContext): void {
 		if (config.hideStatus || !config.interactiveFooter || ctx.mode !== "tui") {
-			if (activeTui) ctx.ui.setFooter(undefined);
-			activeTui = undefined;
+			uninstallFooter(ctx);
 			return;
 		}
 		ctx.ui.setFooter((tui, theme, footerData) => {
@@ -206,6 +236,10 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 				dispose() {
 					unsubInput?.();
 					if (activeTui === tui) activeTui = undefined;
+					// pi disposes a custom footer when it is replaced (another
+					// extension's setFooter) or restored: we no longer own it, so a
+					// later shutdown must not clear the replacement.
+					footerInstalled = false;
 				},
 				invalidate() {},
 				render(width: number): string[] {
@@ -250,6 +284,10 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 				},
 			};
 		});
+		// The factory above runs synchronously inside setFooter; flag ownership
+		// AFTER the call so the dispose() of a previously installed footer (which
+		// clears the flag) cannot race this assignment.
+		footerInstalled = true;
 	}
 
 	pi.on("message_end", async (event, ctx) => {
@@ -540,14 +578,15 @@ export default function antiloopExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_e, ctx) => {
-		if (activeTui) ctx.ui.setFooter(undefined);
-		activeTui = undefined;
+		// Restore the built-in footer ONLY if antiloop installed a custom one.
+		// Clobbering another extension's footer here was half of issue #1.
+		uninstallFooter(ctx);
 	});
 
 	pi.registerCommand("antiloop", {
 		description: "antiloop: detect & break reasoning loops",
 		getArgumentCompletions: (prefix: string) => {
-			const subs = ["enable", "disable", "status", "config", "log", "reset", "test"];
+			const subs = ["enable", "disable", "status", "hide", "show", "config", "log", "reset", "test"];
 			return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
 		},
 		handler: async (args, ctx) => {

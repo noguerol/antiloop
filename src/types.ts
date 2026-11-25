@@ -127,12 +127,19 @@ export interface AntiloopConfig {
 	notifyOnDetection: boolean;
 	maxHistoryEntries: number;
 	detectionWindow: number;
-	/** Hide both footer indicators without disabling loop detection. */
+	/**
+	 * Hide every antiloop status indicator (the setStatus line and the custom
+	 * interactive footer, including its shortcut) WITHOUT disabling detection,
+	 * notifications, interventions or commands. Takes precedence over
+	 * `interactiveFooter`. Useful when another extension owns the footer
+	 * (e.g. @narumitw/pi-statusline) and antiloop's line is just noise.
+	 */
 	hideStatus: boolean;
 	/**
 	 * Show the antiloop indicator as a custom interactive footer in TUI mode
 	 * (replaces the built-in footer). When false, the indicator is still shown
-	 * as a status line via ctx.ui.setStatus unless hideStatus is true.
+	 * as a status line in the built-in footer via ctx.ui.setStatus — unless
+	 * `hideStatus` is true.
 	 */
 	interactiveFooter: boolean;
 	/**
